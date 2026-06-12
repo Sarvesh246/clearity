@@ -29,11 +29,45 @@ body {
   font-family: 'Space Grotesk', sans-serif;
 }
 
+/* App shell — safe areas for PWA / notch devices */
+.app-page {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background-color: #1a1a1e;
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+  padding-top: max(1.25rem, env(safe-area-inset-top));
+  padding-bottom: max(2rem, env(safe-area-inset-bottom));
+}
+
+@media (min-width: 768px) {
+  .app-page {
+    padding-top: max(2.5rem, env(safe-area-inset-top));
+    padding-bottom: max(3rem, env(safe-area-inset-bottom));
+  }
+
+  .app-page--centered {
+    justify-content: center;
+  }
+}
+
+.app-container {
+  width: 100%;
+  max-width: 672px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  flex: 1;
+}
+
 /* Neumorphic base component classes */
 .neu-card {
   background: #222228;
   box-shadow: 6px 6px 12px #111116, -6px -6px 12px #2c2c35;
   border-radius: 16px;
+  padding: 1.25rem;
 }
 
 .neu-button {

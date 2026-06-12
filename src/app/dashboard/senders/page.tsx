@@ -39,18 +39,18 @@ export default async function SendersPage() {
     <main className="min-h-screen flex flex-col bg-base">
       {/* Nav bar */}
       <nav
-        className="neu-card"
+        className="neu-card !p-0 !rounded-none w-full"
         style={{
           position: 'sticky',
           top: 0,
           zIndex: 40,
-          borderRadius: 0,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          padding: '0 16px',
+          paddingLeft: 'max(1rem, env(safe-area-inset-left))',
+          paddingRight: 'max(1rem, env(safe-area-inset-right))',
           paddingTop: 'env(safe-area-inset-top)',
-          height: 'calc(56px + env(safe-area-inset-top))',
+          minHeight: 'calc(56px + env(safe-area-inset-top))',
           borderBottom: '1px solid #2c2c35',
         }}
       >
@@ -68,12 +68,14 @@ export default async function SendersPage() {
         >
           Inbox Recovery
         </span>
-        <button
+        <Link
+          href="/dashboard/settings"
           className="neu-button flex items-center justify-center"
-          style={{ width: 36, height: 36, color: '#8888a0' }}
+          style={{ width: 40, height: 40, color: '#8888a0' }}
+          aria-label="Settings"
         >
           <Settings size={16} strokeWidth={1.75} />
-        </button>
+        </Link>
       </nav>
 
       <div style={{ maxWidth: 672, margin: '0 auto', width: '100%', flex: 1, display: 'flex', flexDirection: 'column' }}>

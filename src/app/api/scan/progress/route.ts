@@ -12,7 +12,7 @@ export async function GET() {
 
   const { data } = await supabase
     .from('scan_jobs')
-    .select('status, phase, scanned, total, list_complete, action_type, processed, sender_statuses')
+    .select('status, phase, scanned, total, list_complete, updated_at, action_type, processed, sender_statuses, unsubscribe_statuses')
     .eq('user_id', user.id)
     .single()
 
@@ -27,9 +27,11 @@ export async function GET() {
     scanned: data.scanned ?? 0,
     total: data.total ?? 0,
     list_complete: data.list_complete ?? undefined,
+    updated_at: data.updated_at ?? null,
     action_type: data.action_type ?? null,
     processed: data.processed ?? 0,
     sender_statuses: data.sender_statuses ?? {},
+    unsubscribe_statuses: data.unsubscribe_statuses ?? {},
   }
 
   return NextResponse.json(progress)

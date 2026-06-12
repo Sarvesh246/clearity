@@ -365,7 +365,7 @@ export default function SenderList({ senders }: SenderListProps) {
       {/* Sender list */}
       <div
         className="overflow-y-auto flex-1"
-        style={{ paddingBottom: 120 }}
+        style={{ paddingBottom: 'calc(120px + env(safe-area-inset-bottom))' }}
       >
         {visibleSenders.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-6" style={{ paddingTop: 60 }}>

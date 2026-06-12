@@ -33,6 +33,7 @@ export interface ScanProgress {
   scanned: number
   total: number
   list_complete?: boolean
+  updated_at?: string | null
   action_type?: 'trash' | 'mark_read' | 'archive' | 'unsub_delete' | null
   processed?: number
   sender_statuses?: Record<string, 'queued' | 'in_progress' | 'done'>

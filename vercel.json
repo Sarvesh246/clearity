@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/resume-scans",
+      "schedule": "*/2 * * * *"
+    }
+  ]
+}

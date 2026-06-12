@@ -10,8 +10,8 @@ export default async function SettingsPage() {
   if (!user) redirect('/')
 
   return (
-    <main className="min-h-screen flex flex-col items-center px-4 py-8 bg-base">
-      <div className="w-full max-w-[672px] flex flex-col gap-5">
+    <main className="app-page app-page--centered">
+      <div className="app-container">
         {/* Header */}
         <div className="flex items-center gap-3">
           <Link
@@ -49,26 +49,28 @@ export default async function SettingsPage() {
         </div>
 
         {/* Actions card */}
-        <div className="neu-card flex flex-col gap-3">
+        <div className="neu-card flex flex-col gap-4">
           <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: '#555568' }}>
             Actions
           </p>
-          <Link
-            href="/dashboard"
-            className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-medium text-base"
-          >
-            Back to Dashboard
-          </Link>
-          <form action={signOut}>
-            <button
-              type="submit"
-              className="neu-button w-full flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm"
-              style={{ color: '#e84141' }}
+          <div className="flex flex-col gap-3">
+            <Link
+              href="/dashboard"
+              className="neu-button w-full flex items-center justify-center gap-2 min-h-[48px] px-6 py-3 text-white font-medium text-base"
             >
-              <LogOut size={16} strokeWidth={1.75} />
-              Sign out
-            </button>
-          </form>
+              Back to Dashboard
+            </Link>
+            <form action={signOut} className="w-full">
+              <button
+                type="submit"
+                className="neu-button w-full flex items-center justify-center gap-2 min-h-[48px] px-6 py-3 font-medium text-sm"
+                style={{ color: '#e84141' }}
+              >
+                <LogOut size={16} strokeWidth={1.75} />
+                Sign out
+              </button>
+            </form>
+          </div>
         </div>
       </div>
     </main>

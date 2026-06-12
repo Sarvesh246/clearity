@@ -22,6 +22,8 @@ interface Props {
   unsureCount: number
   safeCount: number
   junkEmailTotal: number
+  senderCount: number
+  isPartialScan: boolean
 }
 
 function formatTimeAgo(isoDate: string): string {
@@ -45,12 +47,13 @@ const cardVariants = {
 
 export default function DashboardContent({
   firstName, lastScanAt, health, junkCount, unsureCount, safeCount, junkEmailTotal,
+  senderCount, isPartialScan,
 }: Props) {
   const router = useRouter()
   const [dots, setDots] = useState('.')
   const {
     isScanning: isRescanning,
-    isPaused,
+    canContinue,
     progress,
     scanError,
     startScan,
@@ -78,23 +81,23 @@ export default function DashboardContent({
     : progress.total > 0
       ? Math.min(99, Math.round((progress.scanned / progress.total) * 100))
       : 0
-  const hasScan = health !== null
+  const hasScan = senderCount > 0
 
   return (
-    <div className="w-full max-w-[672px] flex flex-col gap-5 pb-8">
+    <div className="w-full flex flex-col gap-5">
       {/* Header */}
       <motion.div
         custom={0} initial="hidden" animate="visible" variants={cardVariants}
-        className="flex items-start justify-between"
+        className="flex items-start justify-between gap-3"
       >
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-1 min-w-0 flex-1">
           <h1
-            className="text-2xl font-bold text-white"
+            className="text-xl sm:text-2xl font-bold text-white leading-tight"
             style={{ letterSpacing: '-0.03em' }}
           >
             Hey, {firstName} 👋
           </h1>
-          <p className="text-sm" style={{ color: '#8888a0' }}>
+          <p className="text-sm leading-snug" style={{ color: '#8888a0' }}>
             {lastScanAt
               ? `Last scan: ${formatTimeAgo(lastScanAt)}`
               : 'No scan yet — scan to see your health score'}
@@ -102,12 +105,35 @@ export default function DashboardContent({
         </div>
         <Link
           href="/dashboard/settings"
-          className="neu-button flex items-center justify-center"
-          style={{ width: 40, height: 40, borderRadius: 12, flexShrink: 0 }}
+          className="neu-button flex items-center justify-center shrink-0"
+          style={{ width: 44, height: 44, borderRadius: 12 }}
+          aria-label="Settings"
         >
           <Settings size={18} strokeWidth={1.75} style={{ color: '#8888a0' }} />
         </Link>
       </motion.div>
+
+      {/* Partial scan — results saved, scan not finished */}
+      {isPartialScan && !isRescanning && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+          className="neu-card flex flex-col gap-3"
+        >
+          <p className="text-sm font-semibold text-white">Partial scan saved</p>
+          <p className="text-xs leading-relaxed" style={{ color: '#8888a0' }}>
+            {formatCount(senderCount)} senders from your inbox so far are classified and ready to clean up.
+            Continue the scan anytime to include the rest.
+          </p>
+          <Link
+            href="/dashboard/senders"
+            className="neu-button w-full flex items-center justify-center gap-2 min-h-[48px] px-6 py-3 text-white font-semibold text-sm"
+            style={{ boxShadow: '0 0 16px #45aaf230, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
+          >
+            <ArrowRight size={16} strokeWidth={2} color="#45aaf2" />
+            Review Saved Senders
+          </Link>
+        </motion.div>
+      )}
 
       {/* Rescan in-progress card */}
       {isRescanning && (
@@ -142,23 +168,39 @@ export default function DashboardContent({
               }} />
             )}
           </div>
-          {progress.total > 0 && (
-            <div className="flex items-center justify-between">
-              <p className="text-xs" style={{ color: '#555568' }}>
-                {isListing
-                  ? `${progress.total.toLocaleString()} emails found so far`
-                  : `${pct}% — ${progress.scanned.toLocaleString()} / ${progress.total.toLocaleString()} emails`}
-              </p>
-              <button
-                onClick={cancelScan}
-                className="neu-button"
-                style={{ padding: '4px 10px', fontSize: 11, color: '#8888a0' }}
-                aria-label="Cancel scan"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
+          <div className="flex flex-col gap-2">
+            {progress.total > 0 ? (
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs" style={{ color: '#555568' }}>
+                  {isListing
+                    ? `${progress.total.toLocaleString()} emails found so far`
+                    : `${pct}% — ${progress.scanned.toLocaleString()} / ${progress.total.toLocaleString()} emails`}
+                </p>
+                <button
+                  onClick={cancelScan}
+                  className="neu-button shrink-0"
+                  style={{ padding: '4px 10px', fontSize: 11, color: '#8888a0' }}
+                  aria-label="Cancel scan"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="flex justify-end">
+                <button
+                  onClick={cancelScan}
+                  className="neu-button shrink-0"
+                  style={{ padding: '4px 10px', fontSize: 11, color: '#8888a0' }}
+                  aria-label="Cancel scan"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+            <p className="text-xs text-center" style={{ color: '#666678' }}>
+              Runs in the background — safe to close this tab
+            </p>
+          </div>
           {scanError && (
             <div className="flex items-center gap-2" style={{ color: '#e84141' }}>
               <AlertCircle size={16} strokeWidth={1.75} />
@@ -171,7 +213,7 @@ export default function DashboardContent({
       {/* Health score card */}
       <motion.div
         custom={1} initial="hidden" animate="visible" variants={cardVariants}
-        className="neu-card flex flex-col items-center gap-2 py-8"
+        className="neu-card flex flex-col items-center gap-3 py-6"
       >
         <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: '#555568' }}>
           Inbox Health Score
@@ -192,7 +234,7 @@ export default function DashboardContent({
       {/* Stat cards */}
       <motion.div
         custom={2} initial="hidden" animate="visible" variants={cardVariants}
-        className="flex gap-3"
+        className="grid grid-cols-3 gap-3"
       >
         <StatCard
           icon={<Trash2 size={18} strokeWidth={1.75} />}
@@ -245,17 +287,17 @@ export default function DashboardContent({
           <>
             <Link
               href="/dashboard/senders"
-              className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-semibold text-base"
+              className="neu-button w-full flex items-center justify-center gap-2 min-h-[52px] px-6 py-4 text-white font-semibold text-base"
               style={{ boxShadow: '0 0 20px #45aaf240, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
             >
               <ArrowRight size={18} strokeWidth={2} color="#45aaf2" />
               Review &amp; Clean Inbox
             </Link>
-            {isPaused && progress.total > 0 && progress.scanned < progress.total && (
+            {canContinue && (
               <button
                 onClick={() => startRescan({ resume: true })}
                 disabled={isRescanning}
-                className="neu-button w-full flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm"
+                className="neu-button w-full flex items-center justify-center gap-2 min-h-[48px] px-6 py-3 font-medium text-sm"
                 style={{ color: '#45aaf2' }}
               >
                 <RefreshCw size={16} strokeWidth={1.75} />
@@ -265,7 +307,7 @@ export default function DashboardContent({
             <button
               onClick={() => startRescan({ full: false })}
               disabled={isRescanning}
-              className="neu-button w-full flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm"
+              className="neu-button w-full flex items-center justify-center gap-2 min-h-[48px] px-6 py-3 font-medium text-sm"
               style={{ color: '#8888a0' }}
             >
               <RefreshCw size={16} strokeWidth={1.75} />
@@ -274,7 +316,7 @@ export default function DashboardContent({
             <button
               onClick={() => startRescan({ full: true })}
               disabled={isRescanning}
-              className="neu-button w-full flex items-center justify-center gap-2 px-6 py-2 font-medium text-xs"
+              className="neu-button w-full flex items-center justify-center gap-2 min-h-[44px] px-6 py-3 font-medium text-xs"
               style={{ color: '#555568' }}
             >
               Full rescan (slow — 145k+ emails)
@@ -285,17 +327,17 @@ export default function DashboardContent({
             <button
               onClick={() => startRescan({ full: true })}
               disabled={isRescanning}
-              className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-semibold text-base"
+              className="neu-button w-full flex items-center justify-center gap-2 min-h-[52px] px-6 py-4 text-white font-semibold text-base"
               style={{ boxShadow: '0 0 20px #45aaf240, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
             >
               <ScanLine size={18} strokeWidth={1.75} color="#45aaf2" />
-              {isRescanning ? 'Scanning…' : isPaused ? 'Start New Scan' : 'Scan My Inbox'}
+              {isRescanning ? 'Scanning…' : 'Scan My Inbox'}
             </button>
-            {isPaused && progress.total > 0 && progress.scanned < progress.total && (
+            {canContinue && (
               <button
                 onClick={() => startRescan({ resume: true })}
                 disabled={isRescanning}
-                className="neu-button w-full flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm"
+                className="neu-button w-full flex items-center justify-center gap-2 min-h-[48px] px-6 py-3 font-medium text-sm"
                 style={{ color: '#45aaf2' }}
               >
                 <RefreshCw size={16} strokeWidth={1.75} />

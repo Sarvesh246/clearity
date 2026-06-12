@@ -14,13 +14,30 @@ export interface StartScanOptions {
   resume?: boolean
 }
 
+const STALE_KICK_MS = 3 * 60 * 1000
+
 function scanNeedsContinuation(data: ScanProgress): boolean {
+  if (data.status === 'cancelled') return false
+  if (data.action_type) return false
   if (data.status === 'error' && data.phase.includes('resume')) return true
   if (data.status !== 'scanning') return false
   if (data.list_complete === false) return true
   if (data.total > 0 && data.scanned < data.total) return true
   if (data.phase.toLowerCase().includes('fetching email list')) return true
   return false
+}
+
+export function canContinueScan(data: ScanProgress): boolean {
+  if (data.status === 'cancelled' || data.status === 'complete') return false
+  if (data.total <= 0 || data.scanned >= data.total) return false
+  if (data.status === 'scanning') return true
+  if (data.status === 'error' && data.phase.includes('resume')) return true
+  return false
+}
+
+function isProgressStale(data: ScanProgress): boolean {
+  if (!data.updated_at) return true
+  return Date.now() - new Date(data.updated_at).getTime() > STALE_KICK_MS
 }
 
 export function useScanRunner(options: UseScanRunnerOptions = {}) {
@@ -61,19 +78,15 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       if (gen !== scanGeneration.current) return
 
       const data = await res.json().catch(() => ({}))
-      if (data.continued && activeRef.current && gen === scanGeneration.current) {
-        const nextOpts = isResumeRun.current ? { resume: true } : {}
-        setTimeout(() => { void requestChunk(nextOpts) }, 300)
+      if (data.error === 'gmail_auth_expired') {
+        onAuthExpired?.()
       }
     } catch {
-      if (activeRef.current && gen === scanGeneration.current) {
-        const nextOpts = isResumeRun.current ? { resume: true } : {}
-        setTimeout(() => { void requestChunk(nextOpts) }, 3000)
-      }
+      // Cron / stale kick will recover stalled scans.
     } finally {
       chunkInFlight.current = false
     }
-  }, [])
+  }, [onAuthExpired])
 
   const pollProgress = useCallback(async () => {
     try {
@@ -83,18 +96,22 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       setProgress(data)
 
       if (data.status === 'cancelled') {
-        setIsPaused(true)
-        if (!activeRef.current) {
-          setIsScanning(false)
-          stopPolling()
-        }
+        activeRef.current = false
+        setIsScanning(false)
+        setIsPaused(false)
+        stopPolling()
         return
       }
 
       setIsPaused(false)
 
-      if (scanNeedsContinuation(data) && activeRef.current) {
-        void requestChunk(data.status === 'error' ? { resume: true } : {})
+      if (
+        scanNeedsContinuation(data) &&
+        isProgressStale(data) &&
+        !chunkInFlight.current
+      ) {
+        const kickOpts = data.status === 'error' || isResumeRun.current ? { resume: true } : {}
+        void requestChunk(kickOpts)
       }
 
       if (data.status === 'complete') {
@@ -113,7 +130,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
           return
         }
         setScanError(true)
-      } else if (data.status === 'scanning') {
+      } else if (data.status === 'scanning' && scanNeedsContinuation(data)) {
         setIsScanning(true)
         setScanError(false)
       }
@@ -121,6 +138,12 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       // keep polling
     }
   }, [onComplete, onAuthExpired, requestChunk, stopPolling])
+
+  const beginPolling = useCallback(() => {
+    if (pollRef.current) return
+    void pollProgress()
+    pollRef.current = setInterval(() => { void pollProgress() }, pollMs)
+  }, [pollMs, pollProgress])
 
   const startScan = useCallback((opts: StartScanOptions = {}) => {
     scanGeneration.current += 1
@@ -137,17 +160,23 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
     })
     stopPolling()
     void requestChunk(opts)
-    pollRef.current = setInterval(() => { void pollProgress() }, pollMs)
-  }, [pollMs, pollProgress, requestChunk, stopPolling, progress.scanned, progress.total])
+    beginPolling()
+  }, [beginPolling, requestChunk, stopPolling, progress.scanned, progress.total])
 
   const cancelScan = useCallback(async () => {
     activeRef.current = false
     scanGeneration.current += 1
-    await fetch('/api/scan/cancel', { method: 'POST' }).catch(() => {})
-    setIsScanning(false)
-    setIsPaused(true)
     stopPolling()
-  }, [stopPolling])
+    setIsScanning(false)
+    setIsPaused(false)
+    setProgress(prev => ({
+      ...prev,
+      status: 'cancelled',
+      phase: 'Scan cancelled',
+    }))
+    await fetch('/api/scan/cancel', { method: 'POST' }).catch(() => {})
+    onComplete?.()
+  }, [onComplete, stopPolling])
 
   const resumeIfNeeded = useCallback(async () => {
     try {
@@ -156,30 +185,24 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       const data: ScanProgress = await res.json()
       setProgress(data)
 
-      if (data.status === 'complete') {
+      if (data.status === 'complete' || data.status === 'cancelled') {
         setIsScanning(false)
         setIsPaused(false)
         return
       }
 
-      if (data.status === 'cancelled') {
-        setIsPaused(true)
-        return
-      }
-
-      if (scanNeedsContinuation(data) || data.status === 'error') {
-        activeRef.current = true
+      if (scanNeedsContinuation(data)) {
         setIsScanning(true)
         setScanError(false)
-        void requestChunk(data.status === 'error' ? { resume: true } : {})
-        if (!pollRef.current) {
-          pollRef.current = setInterval(() => { void pollProgress() }, pollMs)
+        beginPolling()
+        if (isProgressStale(data)) {
+          void requestChunk({ resume: true })
         }
       }
     } catch {
       // ignore
     }
-  }, [pollMs, pollProgress, requestChunk])
+  }, [beginPolling, requestChunk])
 
   useEffect(() => {
     if (resumedRef.current) return
@@ -194,6 +217,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
   return {
     isScanning,
     isPaused,
+    canContinue: canContinueScan(progress),
     progress,
     scanError,
     startScan,

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
+import { finalizePartialScan } from '@/lib/scan/classifyPartial'
 
 function adminClient() {
   return createAdminClient(
@@ -14,16 +15,24 @@ export async function POST() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  const admin = adminClient()
   const now = new Date().toISOString()
-  await adminClient()
+
+  const partial = await finalizePartialScan(admin, user.id)
+
+  await admin
     .from('scan_jobs')
     .update({
       status: 'cancelled',
-      phase: 'Scan paused — tap Continue Scan to resume',
+      phase: partial.senderCount > 0
+        ? `Stopped — ${partial.senderCount.toLocaleString()} senders saved and ready to review`
+        : 'Scan cancelled',
       cancelled_at: now,
       completed_at: now,
+      list_page_token: null,
+      list_complete: true,
     })
     .eq('user_id', user.id)
 
-  return NextResponse.json({ ok: true })
+  return NextResponse.json({ ok: true, ...partial })
 }

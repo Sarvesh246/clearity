@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { CheckCircle2, Loader2, Circle, XCircle, MinusCircle } from 'lucide-react'
 import { formatCount } from '@/lib/utils'
@@ -43,6 +43,89 @@ const STALL_MESSAGES = [
   'Almost there...',
   'Finishing up...',
 ]
+
+const COMPACT_LIST_THRESHOLD = 6
+const MAX_ACTIVE_SENDERS = 3
+
+function countSendersByStatus(
+  senders: UserSender[],
+  statuses: Record<string, 'queued' | 'in_progress' | 'done'>
+) {
+  let done = 0
+  let inProgress = 0
+  for (const s of senders) {
+    const status = statuses[s.sender_email]
+    if (status === 'done') done++
+    else if (status === 'in_progress') inProgress++
+  }
+  return { done, inProgress, total: senders.length }
+}
+
+function ProgressBar({ pct, color }: { pct: number; color: string }) {
+  return (
+    <div
+      className="neu-inset"
+      style={{ borderRadius: 8, height: 10, overflow: 'hidden' }}
+    >
+      <div
+        style={{
+          height: '100%',
+          borderRadius: 8,
+          background: color,
+          width: `${pct}%`,
+          transition: 'width 0.4s ease',
+          boxShadow: `0 0 8px ${color}80`,
+        }}
+      />
+    </div>
+  )
+}
+
+function SenderRow({
+  sender,
+  status,
+  accentColor,
+  trailing,
+  nameColor,
+}: {
+  sender: UserSender
+  status: 'queued' | 'in_progress' | 'done'
+  accentColor: string
+  trailing?: ReactNode
+  nameColor?: string
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+      <span style={{ flexShrink: 0, width: 18, display: 'flex', alignItems: 'center' }}>
+        {status === 'done' ? (
+          <CheckCircle2 size={16} color="#26de81" strokeWidth={2} />
+        ) : status === 'in_progress' ? (
+          <Loader2
+            size={16}
+            color={accentColor}
+            strokeWidth={2}
+            style={{ animation: 'spin 1s linear infinite' }}
+          />
+        ) : (
+          <Circle size={16} color="#555566" strokeWidth={1.5} />
+        )}
+      </span>
+      <span
+        style={{
+          fontSize: 13,
+          color: nameColor ?? (status === 'done' ? '#26de81' : status === 'in_progress' ? '#e8e8f0' : '#666678'),
+          flex: 1,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {sender.sender_name || sender.sender_email}
+      </span>
+      {trailing}
+    </div>
+  )
+}
 
 export default function ProgressModal({
   isOpen,
@@ -151,8 +234,25 @@ export default function ProgressModal({
   const unsubStatuses = progress?.unsubscribe_statuses ?? {}
   const isStalled = stallTimerRef.current === null && stallCycleRef.current !== null
 
-  const isUnsubPhase = actionType === 'unsub_delete' && progress?.phase === 'Unsubscribing...'
-  const isDeletePhase = actionType === 'unsub_delete' && progress?.phase !== 'Unsubscribing...'
+  const isUnsubPhase =
+    (actionType === 'unsub_delete' || actionType === 'unsub_only') &&
+    progress?.phase === 'Unsubscribing...'
+  const isDeletePhase = actionType === 'unsub_delete' && !isUnsubPhase
+
+  const senderProgress = countSendersByStatus(senders, senderStatuses)
+  const senderPct = senderProgress.total > 0
+    ? Math.round((senderProgress.done / senderProgress.total) * 100)
+    : 0
+
+  const activeSenders = senders.filter(
+    s => senderStatuses[s.sender_email] === 'in_progress'
+  )
+  const hiddenActiveCount = Math.max(0, activeSenders.length - MAX_ACTIVE_SENDERS)
+  const visibleActiveSenders = activeSenders.slice(0, MAX_ACTIVE_SENDERS)
+
+  const useCompactList = senders.length <= COMPACT_LIST_THRESHOLD
+
+  const unsubSuccessCount = Object.values(unsubStatuses).filter(s => s.success).length
 
   // ETA calculation for bulk-delete phases
   const etaText = (() => {
@@ -163,6 +263,14 @@ export default function ProgressModal({
     const etaMins = Math.ceil(etaMs / 60_000)
     return etaMins <= 1 ? ' · <1 min left' : ` · ~${etaMins} min left`
   })()
+
+  const phaseHint = progress?.phase &&
+    progress.phase !== 'Unsubscribing...' &&
+    progress.phase !== 'Deleting emails...' &&
+    progress.phase !== 'Processing emails...' &&
+    progress.phase !== 'Done'
+      ? progress.phase
+      : null
 
   return (
     <div
@@ -183,7 +291,14 @@ export default function ProgressModal({
     >
       <div
         className="neu-card"
-        style={{ borderRadius: 24, padding: 24, width: '100%', maxWidth: 400 }}
+        style={{
+          borderRadius: 24,
+          padding: 24,
+          width: '100%',
+          maxWidth: 400,
+          maxHeight: 'min(90vh, 560px)',
+          overflowY: 'auto',
+        }}
       >
         {view === 'progress' && (
           <>
@@ -208,79 +323,38 @@ export default function ProgressModal({
               </p>
             )}
 
-            {/* Phase 1: Unsubscribe results */}
-            {isUnsubPhase && senders.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {senders.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
                 <p style={{ fontSize: 12, color: '#8888a0', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                  Unsubscribing:
+                  {isUnsubPhase ? 'Senders' : 'Senders processed'}
                 </p>
-                {senders.map(sender => {
-                  const status = senderStatuses[sender.sender_email]
-                  const unsubResult = unsubStatuses[sender.sender_email]
-                  const methodLabel = unsubResult ? UNSUB_METHOD_LABELS[unsubResult.method] : ''
-                  return (
-                    <div
-                      key={sender.sender_email}
-                      style={{ display: 'flex', alignItems: 'center', gap: 10 }}
-                    >
-                      <span style={{ flexShrink: 0, width: 18, display: 'flex', alignItems: 'center' }}>
-                        {status === 'done' ? (
-                          unsubResult?.success ? (
-                            <CheckCircle2 size={16} color="#26de81" strokeWidth={2} />
-                          ) : unsubResult?.method === 'none' ? (
-                            <MinusCircle size={16} color="#ffb142" strokeWidth={2} />
-                          ) : (
-                            <XCircle size={16} color="#e84141" strokeWidth={2} />
-                          )
-                        ) : status === 'in_progress' ? (
-                          <Loader2 size={16} color={accentColor} strokeWidth={2} style={{ animation: 'spin 1s linear infinite' }} />
-                        ) : (
-                          <Circle size={16} color="#555566" strokeWidth={1.5} />
-                        )}
-                      </span>
-                      <span style={{ fontSize: 13, color: status === 'done' ? (unsubResult?.success ? '#26de81' : '#8888a0') : status === 'in_progress' ? '#e8e8f0' : '#666678', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {sender.sender_name || sender.sender_email}
-                      </span>
-                      {status === 'done' && (
-                        <span style={{ fontSize: 11, color: unsubResult?.success ? '#26de81' : '#666678', flexShrink: 0 }}>
-                          {methodLabel}
-                        </span>
-                      )}
-                    </div>
-                  )
-                })}
+                <ProgressBar pct={senderPct} color={isUnsubPhase ? '#a55eea' : accentColor} />
+                <p style={{ fontSize: 13, color: '#8888a0', textAlign: 'center' }}>
+                  <span className="text-white font-medium">{senderProgress.done.toLocaleString()}</span>
+                  {' / '}
+                  <span className="text-white font-medium">{senderProgress.total.toLocaleString()}</span>
+                  {' '}senders{' '}
+                  <span style={{ color: isUnsubPhase ? '#a55eea' : accentColor }}>({senderPct}%)</span>
+                  {isUnsubPhase && unsubSuccessCount > 0 && (
+                    <span style={{ color: '#26de81' }}> · {unsubSuccessCount} unsubscribed</span>
+                  )}
+                </p>
               </div>
             )}
 
-            {/* Phase 2: Delete progress (or standard trash/archive/mark_read) */}
             {!isUnsubPhase && (
-              <>
-                {/* Progress bar */}
-                <div
-                  className="neu-inset"
-                  style={{ borderRadius: 8, height: 10, marginBottom: 10, overflow: 'hidden' }}
-                >
-                  <div
-                    style={{
-                      height: '100%',
-                      borderRadius: 8,
-                      background: accentColor,
-                      width: `${pct}%`,
-                      transition: 'width 0.4s ease',
-                      boxShadow: `0 0 8px ${accentColor}80`,
-                    }}
-                  />
-                </div>
-
-                {/* Count */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+                <p style={{ fontSize: 12, color: '#8888a0', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Emails
+                </p>
+                <ProgressBar pct={total > 0 ? pct : 0} color={accentColor} />
                 <p
                   aria-live="polite"
                   aria-atomic="true"
-                  style={{ fontSize: 13, color: '#8888a0', textAlign: 'center', marginBottom: 20 }}
+                  style={{ fontSize: 13, color: '#8888a0', textAlign: 'center' }}
                 >
                   {total > 0 ? (
                     <>
-                      Processed{' '}
                       <span className="text-white font-medium">{processed.toLocaleString()}</span>
                       {' / '}
                       <span className="text-white font-medium">{total.toLocaleString()}</span>
@@ -292,41 +366,123 @@ export default function ProgressModal({
                     'Collecting message IDs...'
                   )}
                 </p>
+              </div>
+            )}
 
-                {/* Per-sender status */}
-                {senders.length > 0 && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <p style={{ fontSize: 12, color: '#8888a0', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                      Working on:
-                    </p>
-                    {senders.map(sender => {
-                      const status = senderStatuses[sender.sender_email]
-                      return (
-                        <div
-                          key={sender.sender_email}
-                          style={{ display: 'flex', alignItems: 'center', gap: 10 }}
-                        >
-                          <span style={{ flexShrink: 0, width: 18, display: 'flex', alignItems: 'center' }}>
-                            {status === 'done' ? (
-                              <CheckCircle2 size={16} color="#26de81" strokeWidth={2} />
-                            ) : status === 'in_progress' ? (
-                              <Loader2 size={16} color={accentColor} strokeWidth={2} style={{ animation: 'spin 1s linear infinite' }} />
-                            ) : (
-                              <Circle size={16} color="#555566" strokeWidth={1.5} />
-                            )}
-                          </span>
-                          <span style={{ fontSize: 13, color: status === 'done' ? '#26de81' : status === 'in_progress' ? '#e8e8f0' : '#666678', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {sender.sender_name || sender.sender_email}
-                          </span>
+            {phaseHint && (
+              <p
+                style={{
+                  fontSize: 12,
+                  color: '#666678',
+                  textAlign: 'center',
+                  marginBottom: 16,
+                  lineHeight: 1.4,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={phaseHint}
+              >
+                {phaseHint}
+              </p>
+            )}
+
+            {useCompactList ? (
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                  maxHeight: 220,
+                  overflowY: 'auto',
+                  paddingRight: 4,
+                }}
+              >
+                <p style={{ fontSize: 12, color: '#8888a0', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  {isUnsubPhase ? 'Unsubscribing' : 'Progress'}
+                </p>
+                {senders.map(sender => {
+                  const status = senderStatuses[sender.sender_email] ?? 'queued'
+                  const unsubResult = unsubStatuses[sender.sender_email]
+                  const methodLabel = unsubResult ? UNSUB_METHOD_LABELS[unsubResult.method] : ''
+
+                  if (isUnsubPhase && status === 'done') {
+                    return (
+                      <div key={sender.sender_email} style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                        <span style={{ flexShrink: 0, width: 18, display: 'flex', alignItems: 'center' }}>
+                          {unsubResult?.success ? (
+                            <CheckCircle2 size={16} color="#26de81" strokeWidth={2} />
+                          ) : unsubResult?.method === 'none' ? (
+                            <MinusCircle size={16} color="#ffb142" strokeWidth={2} />
+                          ) : (
+                            <XCircle size={16} color="#e84141" strokeWidth={2} />
+                          )}
+                        </span>
+                        <span style={{ fontSize: 13, color: unsubResult?.success ? '#26de81' : '#8888a0', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {sender.sender_name || sender.sender_email}
+                        </span>
+                        {methodLabel && (
+                          <span style={{ fontSize: 11, color: '#666678', flexShrink: 0 }}>{methodLabel}</span>
+                        )}
+                      </div>
+                    )
+                  }
+
+                  return (
+                    <SenderRow
+                      key={sender.sender_email}
+                      sender={sender}
+                      status={status}
+                      accentColor={accentColor}
+                      trailing={
+                        !isUnsubPhase ? (
                           <span style={{ fontSize: 12, color: '#666678', flexShrink: 0 }}>
                             {formatCount(sender.email_count)}
                           </span>
-                        </div>
-                      )
-                    })}
-                  </div>
+                        ) : undefined
+                      }
+                    />
+                  )
+                })}
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <p style={{ fontSize: 12, color: '#8888a0', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  {activeSenders.length > 0 ? 'Working on now' : senderProgress.done < senderProgress.total ? 'Up next' : 'Finishing up'}
+                </p>
+                {visibleActiveSenders.length > 0 ? (
+                  <>
+                    {visibleActiveSenders.map(sender => (
+                      <SenderRow
+                        key={sender.sender_email}
+                        sender={sender}
+                        status="in_progress"
+                        accentColor={accentColor}
+                        trailing={
+                          <span style={{ fontSize: 12, color: '#666678', flexShrink: 0 }}>
+                            {isUnsubPhase
+                              ? (unsubStatuses[sender.sender_email] ? UNSUB_METHOD_LABELS[unsubStatuses[sender.sender_email].method] : '')
+                              : formatCount(sender.email_count)}
+                          </span>
+                        }
+                      />
+                    ))}
+                    {hiddenActiveCount > 0 && (
+                      <p style={{ fontSize: 12, color: '#666678', paddingLeft: 28 }}>
+                        +{hiddenActiveCount} more in parallel
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p style={{ fontSize: 13, color: '#666678', paddingLeft: 2 }}>
+                    {senderProgress.done >= senderProgress.total
+                      ? 'Wrapping up...'
+                      : total === 0 && !isUnsubPhase
+                        ? 'Fetching email list from Gmail...'
+                        : `${(senderProgress.total - senderProgress.done).toLocaleString()} senders remaining`}
+                  </p>
                 )}
-              </>
+              </div>
             )}
           </>
         )}
