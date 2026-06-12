@@ -50,6 +50,7 @@ export default function DashboardContent({
   const [dots, setDots] = useState('.')
   const {
     isScanning: isRescanning,
+    isPaused,
     progress,
     scanError,
     startScan,
@@ -66,9 +67,9 @@ export default function DashboardContent({
     return () => clearInterval(id)
   }, [isRescanning])
 
-  function startRescan(full = false) {
+  function startRescan(opts: { full?: boolean; resume?: boolean } = {}) {
     setScanError(false)
-    startScan(full)
+    startScan(opts)
   }
 
   const pct = progress.total > 0 ? Math.round((progress.scanned / progress.total) * 100) : 0
@@ -232,8 +233,19 @@ export default function DashboardContent({
               <ArrowRight size={18} strokeWidth={2} color="#45aaf2" />
               Review &amp; Clean Inbox
             </Link>
+            {isPaused && progress.total > 0 && progress.scanned < progress.total && (
+              <button
+                onClick={() => startRescan({ resume: true })}
+                disabled={isRescanning}
+                className="neu-button w-full flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm"
+                style={{ color: '#45aaf2' }}
+              >
+                <RefreshCw size={16} strokeWidth={1.75} />
+                Continue Scan ({progress.scanned.toLocaleString()} / {progress.total.toLocaleString()})
+              </button>
+            )}
             <button
-              onClick={() => startRescan(false)}
+              onClick={() => startRescan({ full: false })}
               disabled={isRescanning}
               className="neu-button w-full flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm"
               style={{ color: '#8888a0' }}
@@ -242,7 +254,7 @@ export default function DashboardContent({
               {isRescanning ? 'Syncing…' : 'Sync New Emails'}
             </button>
             <button
-              onClick={() => startRescan(true)}
+              onClick={() => startRescan({ full: true })}
               disabled={isRescanning}
               className="neu-button w-full flex items-center justify-center gap-2 px-6 py-2 font-medium text-xs"
               style={{ color: '#555568' }}
@@ -251,15 +263,28 @@ export default function DashboardContent({
             </button>
           </>
         ) : (
-          <button
-            onClick={() => startRescan(true)}
-            disabled={isRescanning}
-            className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-semibold text-base"
-            style={{ boxShadow: '0 0 20px #45aaf240, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
-          >
-            <ScanLine size={18} strokeWidth={1.75} color="#45aaf2" />
-            {isRescanning ? 'Scanning…' : 'Scan My Inbox'}
-          </button>
+          <>
+            <button
+              onClick={() => startRescan({ full: true })}
+              disabled={isRescanning}
+              className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-semibold text-base"
+              style={{ boxShadow: '0 0 20px #45aaf240, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
+            >
+              <ScanLine size={18} strokeWidth={1.75} color="#45aaf2" />
+              {isRescanning ? 'Scanning…' : isPaused ? 'Start New Scan' : 'Scan My Inbox'}
+            </button>
+            {isPaused && progress.total > 0 && progress.scanned < progress.total && (
+              <button
+                onClick={() => startRescan({ resume: true })}
+                disabled={isRescanning}
+                className="neu-button w-full flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm"
+                style={{ color: '#45aaf2' }}
+              >
+                <RefreshCw size={16} strokeWidth={1.75} />
+                Continue Scan ({progress.scanned.toLocaleString()} / {progress.total.toLocaleString()})
+              </button>
+            )}
+          </>
         )}
       </motion.div>
     </div>

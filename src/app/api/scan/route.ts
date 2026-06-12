@@ -99,6 +99,8 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json().catch(() => ({}))
   const forceFull = body.full === true
+  const resumeRequested = body.resume === true
+  const runStartedAt = new Date().toISOString()
 
   const admin = adminClient()
 
@@ -112,11 +114,15 @@ export async function POST(request: NextRequest) {
   const cursor = existingJob?.cursor ?? 0
   const listComplete = existingJob?.list_complete ?? false
 
+  const hasIncompleteScan =
+    existingJob &&
+    (!listComplete || cursor < total) &&
+    (total > 0 || existingJob.list_page_token)
+
   const canResume =
     !forceFull &&
-    existingJob &&
-    ['scanning', 'error', 'cancelled'].includes(existingJob.status) &&
-    (!listComplete || cursor < total)
+    (resumeRequested || existingJob?.status === 'scanning' || existingJob?.status === 'error') &&
+    hasIncompleteScan
 
   const useIncremental =
     !forceFull &&
@@ -133,12 +139,16 @@ export async function POST(request: NextRequest) {
         user_id: user.id,
         status: 'scanning',
         phase: 'Syncing new emails...',
+        started_at: runStartedAt,
+        cancelled_at: null,
         completed_at: null,
       })
     } else if (canResume) {
       await saveScanProgress(admin, user.id, {
         status: 'scanning',
         phase: listComplete ? 'Resuming scan...' : 'Resuming email list...',
+        started_at: runStartedAt,
+        cancelled_at: null,
         completed_at: null,
       })
     } else {
@@ -153,7 +163,8 @@ export async function POST(request: NextRequest) {
         cursor: 0,
         list_page_token: null,
         list_complete: false,
-        started_at: new Date().toISOString(),
+        started_at: runStartedAt,
+        cancelled_at: null,
         completed_at: null,
       })
     }
@@ -164,8 +175,16 @@ export async function POST(request: NextRequest) {
 
     const ac = new AbortController()
     cancelPoll = setInterval(async () => {
-      const { data } = await admin.from('scan_jobs').select('status').eq('user_id', user.id).single()
-      if (data?.status === 'cancelled') {
+      const { data } = await admin
+        .from('scan_jobs')
+        .select('status, started_at, cancelled_at')
+        .eq('user_id', user.id)
+        .single()
+      if (data?.status !== 'cancelled') return
+      const cancelledAt = data.cancelled_at ? new Date(data.cancelled_at).getTime() : 0
+      const startedAt = data.started_at ? new Date(data.started_at).getTime() : 0
+      // Only abort if cancel happened after this run started (ignore stale cancels)
+      if (cancelledAt > startedAt) {
         ac.abort()
         clearInterval(cancelPoll)
       }

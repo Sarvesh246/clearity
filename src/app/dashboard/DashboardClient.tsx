@@ -32,9 +32,9 @@ export default function DashboardClient({ email }: Props) {
     return () => clearInterval(id)
   }, [isScanning])
 
-  function handleStartScan() {
+  function handleStartScan(resume = false) {
     setScanError(false)
-    startScan(true)
+    startScan(resume ? { resume: true } : { full: true })
   }
 
   const pct = progress.total > 0 ? Math.round((progress.scanned / progress.total) * 100) : 0
@@ -69,7 +69,7 @@ export default function DashboardClient({ email }: Props) {
 
         {!isScanning && !scanError && (
           <button
-            onClick={handleStartScan}
+            onClick={() => handleStartScan()}
             className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-medium text-base"
           >
             <ScanLine size={18} strokeWidth={1.75} />
@@ -114,7 +114,7 @@ export default function DashboardClient({ email }: Props) {
               <span className="text-sm font-medium">Scan failed. Tap retry to continue where it left off.</span>
             </div>
             <button
-              onClick={handleStartScan}
+              onClick={() => handleStartScan()}
               className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-medium text-base"
             >
               <ScanLine size={18} strokeWidth={1.75} />

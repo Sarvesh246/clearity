@@ -14,9 +14,15 @@ export async function POST() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  const now = new Date().toISOString()
   await adminClient()
     .from('scan_jobs')
-    .update({ status: 'cancelled', phase: 'Cancelled by user' })
+    .update({
+      status: 'cancelled',
+      phase: 'Scan paused — tap Continue Scan to resume',
+      cancelled_at: now,
+      completed_at: now,
+    })
     .eq('user_id', user.id)
 
   return NextResponse.json({ ok: true })
