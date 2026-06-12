@@ -205,7 +205,6 @@ export async function runScanChunk(
           phase: listComplete ? 'Resuming scan...' : 'Resuming email list...',
           started_at: runStartedAt,
           completed_at: null,
-          cancelled_at: null,
           updated_at: new Date().toISOString(),
         })
         .eq('user_id', userId)

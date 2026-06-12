@@ -78,6 +78,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(opts ?? {}),
+        cache: 'no-store',
       })
       if (gen !== scanGeneration.current) return
 
@@ -94,7 +95,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
 
   const pollProgress = useCallback(async () => {
     try {
-      const res = await fetch('/api/scan/progress')
+      const res = await fetch('/api/scan/progress', { cache: 'no-store' })
       if (!res.ok) return
       const data: ScanProgress = await res.json()
 
@@ -207,7 +208,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
 
   const resumeIfNeeded = useCallback(async () => {
     try {
-      const res = await fetch('/api/scan/progress')
+      const res = await fetch('/api/scan/progress', { cache: 'no-store' })
       if (!res.ok) return
       const data: ScanProgress = await res.json()
 

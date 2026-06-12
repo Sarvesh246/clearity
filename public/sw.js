@@ -1,4 +1,4 @@
-const CACHE = 'clearity-v1'
+const CACHE = 'clearity-v2'
 
 const PRECACHE = [
   '/offline',
@@ -37,17 +37,11 @@ self.addEventListener('fetch', event => {
   // Only handle same-origin requests
   if (url.origin !== self.location.origin) return
 
-  // API routes: network-first, fall back to cache
+  // API routes: always network — never cache mutations or error responses.
+  // Caching a failed POST (e.g. 500) caused instant replays until devtools
+  // bypassed the service worker, making scans appear stuck until console open.
   if (url.pathname.startsWith('/api/')) {
-    event.respondWith(
-      fetch(request)
-        .then(res => {
-          const clone = res.clone()
-          caches.open(CACHE).then(c => c.put(request, clone))
-          return res
-        })
-        .catch(() => caches.match(request))
-    )
+    event.respondWith(fetch(request))
     return
   }
 
