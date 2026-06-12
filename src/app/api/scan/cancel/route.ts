@@ -27,7 +27,6 @@ export async function POST() {
       phase: partial.senderCount > 0
         ? `Stopped — ${partial.senderCount.toLocaleString()} senders saved and ready to review`
         : 'Scan cancelled',
-      cancelled_at: now,
       completed_at: now,
       list_page_token: null,
       list_complete: true,

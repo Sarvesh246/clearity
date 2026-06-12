@@ -120,9 +120,10 @@ ALTER TABLE public.scan_jobs
   ADD COLUMN IF NOT EXISTS cursor INTEGER DEFAULT 0,
   ADD COLUMN IF NOT EXISTS list_page_token TEXT,
   ADD COLUMN IF NOT EXISTS list_complete BOOLEAN DEFAULT FALSE,
-  ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS chunk_locked_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+-- Note: cancel state is tracked via status='cancelled' + completed_at; no
+-- dedicated cancelled_at column is required.
 
 ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS gmail_history_id TEXT;

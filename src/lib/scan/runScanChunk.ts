@@ -115,10 +115,14 @@ async function saveScanProgress(
   userId: string,
   fields: Record<string, unknown>
 ) {
-  await admin.from('scan_jobs').update({
+  const { error } = await admin.from('scan_jobs').update({
     ...fields,
     updated_at: new Date().toISOString(),
   }).eq('user_id', userId)
+  // Surface (don't swallow) write failures — a silently-failing status write
+  // makes the whole scan look like it "crashes" with no trace. Logging here is
+  // what turns a schema/permissions drift from a mystery into a one-line clue.
+  if (error) console.error('[scan] saveScanProgress failed:', error.message)
 }
 
 export async function runScanChunk(
@@ -180,30 +184,29 @@ export async function runScanChunk(
     globalCursor = cursor
 
     if (useIncremental) {
-      await admin.from('scan_jobs').upsert({
+      const { error: incErr } = await admin.from('scan_jobs').upsert({
         user_id: userId,
         status: 'scanning',
         action_type: null,
         phase: 'Syncing new emails...',
         started_at: runStartedAt,
-        cancelled_at: null,
         completed_at: null,
         chunk_locked_at: new Date().toISOString(),
         updated_at: runStartedAt,
       })
+      if (incErr) throw new Error(`Failed to start sync: ${incErr.message}`)
     } else if (canResume) {
       // Conditional update: don't overwrite 'cancelled'. A cancel request may
       // have landed between our lock acquisition and this write — if so, the
       // WHERE clause matches zero rows and we skip rather than silently
       // reopening a scan the user just stopped.
-      const { data: resumed } = await admin
+      const { data: resumed, error: resumeErr } = await admin
         .from('scan_jobs')
         .update({
           status: 'scanning',
           action_type: null,
           phase: listComplete ? 'Resuming scan...' : 'Resuming email list...',
           started_at: runStartedAt,
-          cancelled_at: null,
           completed_at: null,
           updated_at: new Date().toISOString(),
         })
@@ -212,13 +215,14 @@ export async function runScanChunk(
         .select('user_id')
         .maybeSingle()
 
+      if (resumeErr) throw new Error(`Failed to resume scan: ${resumeErr.message}`)
       if (!resumed) {
         return { skipped: true }
       }
     } else {
       await clearMessageIds(admin, userId)
       await admin.from('user_senders').delete().eq('user_id', userId)
-      await admin.from('scan_jobs').upsert({
+      const { error: startErr } = await admin.from('scan_jobs').upsert({
         user_id: userId,
         status: 'scanning',
         action_type: null,
@@ -229,11 +233,11 @@ export async function runScanChunk(
         list_page_token: null,
         list_complete: false,
         started_at: runStartedAt,
-        cancelled_at: null,
         completed_at: null,
         chunk_locked_at: new Date().toISOString(),
         updated_at: runStartedAt,
       })
+      if (startErr) throw new Error(`Failed to start scan: ${startErr.message}`)
     }
 
     const refreshToken = await getRefreshTokenForUser(admin, userId)
@@ -241,16 +245,20 @@ export async function runScanChunk(
     const deadline = Date.now() + CHUNK_TIME_BUDGET_MS
 
     const ac = new AbortController()
+    const runStartedMs = new Date(runStartedAt).getTime()
     cancelPoll = setInterval(async () => {
-      const { data } = await admin
+      const { data, error } = await admin
         .from('scan_jobs')
-        .select('status, started_at, cancelled_at')
+        .select('status, started_at')
         .eq('user_id', userId)
         .single()
-      if (data?.status !== 'cancelled') return
-      const cancelledAt = data.cancelled_at ? new Date(data.cancelled_at).getTime() : 0
-      const startedAt = data.started_at ? new Date(data.started_at).getTime() : 0
-      if (cancelledAt > startedAt) {
+      if (error || !data) return
+      // Abort this run if the user cancelled it, or if a newer run took over the
+      // row (started_at advanced past ours — possible only after the chunk lock
+      // goes stale). Both writers set started_at to their own runStartedAt, so a
+      // mismatch means this invocation is no longer the active one.
+      const startedMs = data.started_at ? new Date(data.started_at).getTime() : 0
+      if (data.status === 'cancelled' || startedMs !== runStartedMs) {
         ac.abort()
         clearInterval(cancelPoll)
       }
@@ -395,7 +403,22 @@ export async function runScanChunk(
     const ids = await loadMessageIdsForRange(admin, userId, globalCursor, globalCursor + ID_SLICE)
 
     if (ids.length === 0 && globalCursor < messageTotal) {
-      throw new Error('Scan state mismatch — retry to continue')
+      // The persisted message-id list was lost (cleared by an interrupted
+      // finalize or a partial write) while the cursor still says there's more to
+      // read. Throwing here just loops forever — instead, reset the listing
+      // state so the next chunk rebuilds the list from scratch and self-heals.
+      await clearMessageIds(admin, userId)
+      await saveScanProgress(admin, userId, {
+        status: 'scanning',
+        phase: 'Rebuilding email list...',
+        scanned: 0,
+        cursor: 0,
+        total: 0,
+        list_page_token: null,
+        list_complete: false,
+      })
+      clearInterval(cancelPoll)
+      return { continued: true, scanned: 0, total: 0 }
     }
 
     const startedAt = Date.now()
