@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/resume-scans",
-      "schedule": "*/2 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
