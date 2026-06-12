@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
+import { useScanRunner } from '@/hooks/useScanRunner'
 import { motion } from 'framer-motion'
 import {
   Settings, Mail, ScanLine, AlertCircle,
@@ -12,7 +13,6 @@ import HealthScoreCircle from '@/components/HealthScoreCircle'
 import StatCard from '@/components/StatCard'
 import { formatCount } from '@/lib/utils'
 import type { HealthScore } from '@/lib/scoring'
-import type { ScanProgress } from '@/types'
 
 interface Props {
   firstName: string
@@ -47,11 +47,18 @@ export default function DashboardContent({
   firstName, lastScanAt, health, junkCount, unsureCount, safeCount, junkEmailTotal,
 }: Props) {
   const router = useRouter()
-  const [isRescanning, setIsRescanning] = useState(false)
-  const [progress, setProgress] = useState<ScanProgress>({ status: 'idle', phase: '', scanned: 0, total: 0 })
-  const [scanError, setScanError] = useState(false)
   const [dots, setDots] = useState('.')
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const {
+    isScanning: isRescanning,
+    progress,
+    scanError,
+    startScan,
+    cancelScan,
+    setScanError,
+  } = useScanRunner({
+    onComplete: () => router.refresh(),
+    onAuthExpired: () => router.push('/?message=gmail_auth_expired'),
+  })
 
   useEffect(() => {
     if (!isRescanning) return
@@ -59,46 +66,9 @@ export default function DashboardContent({
     return () => clearInterval(id)
   }, [isRescanning])
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
-
-  async function startRescan() {
-    setIsRescanning(true)
+  function startRescan(full = false) {
     setScanError(false)
-    setProgress({ status: 'scanning', phase: 'Connecting to Gmail...', scanned: 0, total: 0 })
-
-    fetch('/api/scan', { method: 'POST' }).catch(() => {})
-
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch('/api/scan/progress')
-        if (!res.ok) return
-        const data: ScanProgress = await res.json()
-        setProgress(data)
-        if (data.status === 'complete') {
-          clearInterval(pollRef.current!)
-          pollRef.current = null
-          router.refresh()
-          setIsRescanning(false)
-        } else if (data.status === 'cancelled') {
-          clearInterval(pollRef.current!)
-          pollRef.current = null
-          setIsRescanning(false)
-          router.refresh()
-        } else if (data.status === 'error') {
-          clearInterval(pollRef.current!)
-          pollRef.current = null
-          if (data.phase === 'Gmail access expired') {
-            router.push('/?message=gmail_auth_expired')
-            return
-          }
-          setScanError(true)
-        }
-      } catch { /* keep polling */ }
-    }, 2000)
-  }
-
-  async function handleCancelScan() {
-    await fetch('/api/scan/cancel', { method: 'POST' }).catch(() => {})
+    startScan(full)
   }
 
   const pct = progress.total > 0 ? Math.round((progress.scanned / progress.total) * 100) : 0
@@ -161,7 +131,7 @@ export default function DashboardContent({
                 {pct}% — {progress.scanned.toLocaleString()} / {progress.total.toLocaleString()} emails
               </p>
               <button
-                onClick={handleCancelScan}
+                onClick={cancelScan}
                 className="neu-button"
                 style={{ padding: '4px 10px', fontSize: 11, color: '#8888a0' }}
                 aria-label="Cancel scan"
@@ -263,18 +233,26 @@ export default function DashboardContent({
               Review &amp; Clean Inbox
             </Link>
             <button
-              onClick={startRescan}
+              onClick={() => startRescan(false)}
               disabled={isRescanning}
               className="neu-button w-full flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm"
               style={{ color: '#8888a0' }}
             >
               <RefreshCw size={16} strokeWidth={1.75} />
-              {isRescanning ? 'Rescanning…' : 'Rescan Inbox'}
+              {isRescanning ? 'Syncing…' : 'Sync New Emails'}
+            </button>
+            <button
+              onClick={() => startRescan(true)}
+              disabled={isRescanning}
+              className="neu-button w-full flex items-center justify-center gap-2 px-6 py-2 font-medium text-xs"
+              style={{ color: '#555568' }}
+            >
+              Full rescan (slow — 145k+ emails)
             </button>
           </>
         ) : (
           <button
-            onClick={startRescan}
+            onClick={() => startRescan(true)}
             disabled={isRescanning}
             className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-semibold text-base"
             style={{ boxShadow: '0 0 20px #45aaf240, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}

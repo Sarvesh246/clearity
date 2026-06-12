@@ -1,15 +1,17 @@
 'use server'
 
+import { getAppOrigin } from '@/lib/app-url'
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 
 export async function signInWithGoogle() {
   const supabase = await createClient()
+  const origin = await getAppOrigin()
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
       scopes: 'https://www.googleapis.com/auth/gmail.modify',
-      redirectTo: `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,
+      redirectTo: `${origin}/auth/callback`,
       queryParams: {
         access_type: 'offline', // gets refresh token
         prompt: 'consent',      // forces refresh token on every sign-in

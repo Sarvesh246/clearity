@@ -32,6 +32,7 @@ export interface ScanProgress {
   phase: string
   scanned: number
   total: number
+  list_complete?: boolean
   action_type?: 'trash' | 'mark_read' | 'archive' | 'unsub_delete' | null
   processed?: number
   sender_statuses?: Record<string, 'queued' | 'in_progress' | 'done'>

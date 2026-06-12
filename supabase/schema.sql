@@ -111,3 +111,31 @@ ALTER TABLE public.scan_jobs
 -- ============================================================
 ALTER TABLE public.scan_jobs
   ADD COLUMN IF NOT EXISTS unsubscribe_statuses JSONB DEFAULT '{}'::jsonb;
+
+-- ============================================================
+-- Stage 11 Migration: Resumable chunked scans (200k+ inboxes)
+-- Run in the Supabase SQL editor
+-- ============================================================
+ALTER TABLE public.scan_jobs
+  ADD COLUMN IF NOT EXISTS cursor INTEGER DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS list_page_token TEXT,
+  ADD COLUMN IF NOT EXISTS list_complete BOOLEAN DEFAULT FALSE;
+
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS gmail_history_id TEXT;
+
+-- Stores message IDs in rows (avoids multi-MB JSONB for 200k emails)
+CREATE TABLE IF NOT EXISTS public.scan_message_ids (
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  message_id TEXT NOT NULL,
+  PRIMARY KEY (user_id, idx)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_message_ids_user
+  ON public.scan_message_ids(user_id, idx);
+
+ALTER TABLE public.scan_message_ids ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users can only access own scan message ids"
+  ON public.scan_message_ids FOR ALL
+  USING (auth.uid() = user_id);
