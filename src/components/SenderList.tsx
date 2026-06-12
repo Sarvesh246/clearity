@@ -1,0 +1,423 @@
+'use client'
+
+import { useReducer, useMemo, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import { AnimatePresence } from 'framer-motion'
+import Link from 'next/link'
+import { ScanLine } from 'lucide-react'
+import type { UserSender, FilterValue, Classification } from '@/types'
+import FilterTabs from './FilterTabs'
+import SenderCard from './SenderCard'
+import ActionBar from './ActionBar'
+import ProgressModal from './ProgressModal'
+import InstallPrompt from './InstallPrompt'
+
+interface SenderListProps {
+  senders: UserSender[]
+}
+
+interface ActiveAction {
+  type: 'trash' | 'mark_read' | 'archive' | 'unsub_delete' | 'unsub_only'
+  senders: UserSender[]
+}
+
+interface SenderState {
+  selectedSenders: Set<string>
+  activeFilter: FilterValue
+  localSenders: UserSender[]
+  activeAction: ActiveAction | null
+  hideZeroEmail: boolean
+  overrides: Map<string, Classification>
+}
+
+type SenderAction =
+  | { type: 'TOGGLE_SENDER'; email: string }
+  | { type: 'SELECT_ALL_VISIBLE'; visibleEmails: string[] }
+  | { type: 'DESELECT_ALL' }
+  | { type: 'SET_FILTER'; filter: FilterValue }
+  | { type: 'REMOVE_SENDERS'; emails: Set<string> }
+  | { type: 'ZERO_UNREAD'; emails: Set<string> }
+  | { type: 'MARK_UNSUBSCRIBED'; emails: Set<string> }
+  | { type: 'SET_ACTIVE_ACTION'; action: ActiveAction | null }
+  | { type: 'INIT_SENDERS'; senders: UserSender[] }
+  | { type: 'TOGGLE_HIDE_ZERO' }
+  | { type: 'SET_OVERRIDE'; email: string; classification: Classification | null }
+
+function senderReducer(state: SenderState, action: SenderAction): SenderState {
+  switch (action.type) {
+    case 'TOGGLE_SENDER': {
+      const next = new Set(state.selectedSenders)
+      if (next.has(action.email)) next.delete(action.email)
+      else next.add(action.email)
+      return { ...state, selectedSenders: next }
+    }
+    case 'SELECT_ALL_VISIBLE':
+      return { ...state, selectedSenders: new Set(action.visibleEmails) }
+    case 'DESELECT_ALL':
+      return { ...state, selectedSenders: new Set() }
+    case 'SET_FILTER':
+      return { ...state, activeFilter: action.filter }
+    case 'REMOVE_SENDERS':
+      return {
+        ...state,
+        localSenders: state.localSenders.filter(s => !action.emails.has(s.sender_email)),
+        selectedSenders: new Set([...state.selectedSenders].filter(e => !action.emails.has(e))),
+      }
+    case 'ZERO_UNREAD':
+      return {
+        ...state,
+        localSenders: state.localSenders.map(s =>
+          action.emails.has(s.sender_email) ? { ...s, unread_count: 0 } : s
+        ),
+      }
+    case 'MARK_UNSUBSCRIBED':
+      return {
+        ...state,
+        localSenders: state.localSenders.map(s =>
+          action.emails.has(s.sender_email)
+            ? { ...s, is_unsubscribed: true, email_count: 0, unread_count: 0 }
+            : s
+        ),
+      }
+    case 'SET_ACTIVE_ACTION':
+      return { ...state, activeAction: action.action }
+    case 'INIT_SENDERS':
+      return { ...state, localSenders: action.senders }
+    case 'TOGGLE_HIDE_ZERO':
+      return { ...state, hideZeroEmail: !state.hideZeroEmail }
+    case 'SET_OVERRIDE': {
+      const next = new Map(state.overrides)
+      if (action.classification === null) next.delete(action.email)
+      else next.set(action.email, action.classification)
+      return {
+        ...state,
+        overrides: next,
+        localSenders: state.localSenders.map(s =>
+          s.sender_email === action.email
+            ? { ...s, classification: action.classification ?? s.classification }
+            : s
+        ),
+      }
+    }
+  }
+}
+
+export default function SenderList({ senders }: SenderListProps) {
+  const router = useRouter()
+  const [state, dispatch] = useReducer(senderReducer, {
+    selectedSenders: new Set<string>(),
+    activeFilter: 'all',
+    localSenders: senders,
+    activeAction: null,
+    hideZeroEmail: true,
+    overrides: new Map(),
+  })
+
+  const { selectedSenders, activeFilter, localSenders, activeAction, hideZeroEmail } = state
+
+  // Sync if parent re-fetches (e.g., navigation)
+  useEffect(() => {
+    dispatch({ type: 'INIT_SENDERS', senders })
+  }, [senders])
+
+  const visibleSenders = useMemo(() => {
+    let list = activeFilter === 'all' ? localSenders : localSenders.filter(s => s.classification === activeFilter)
+    if (hideZeroEmail) list = list.filter(s => s.email_count > 0)
+    return list
+  }, [localSenders, activeFilter, hideZeroEmail])
+
+  const visibleEmails = useMemo(
+    () => visibleSenders.map(s => s.sender_email),
+    [visibleSenders]
+  )
+
+  const allVisibleSelected =
+    visibleSenders.length > 0 && visibleSenders.every(s => selectedSenders.has(s.sender_email))
+
+  const selectedCount = selectedSenders.size
+
+  const selectedTotalEmails = useMemo(() => {
+    return localSenders
+      .filter(s => selectedSenders.has(s.sender_email))
+      .reduce((sum, s) => sum + s.email_count, 0)
+  }, [localSenders, selectedSenders])
+
+  const hasUnsubscribable = useMemo(() => {
+    return localSenders
+      .filter(s => selectedSenders.has(s.sender_email))
+      .some(s => s.has_unsubscribe_header)
+  }, [localSenders, selectedSenders])
+
+  const unsubscribableCount = useMemo(() => {
+    return localSenders
+      .filter(s => selectedSenders.has(s.sender_email) && s.has_unsubscribe_header)
+      .length
+  }, [localSenders, selectedSenders])
+
+  const counts = useMemo(() => ({
+    all: localSenders.length,
+    junk: localSenders.filter(s => s.classification === 'junk').length,
+    unsure: localSenders.filter(s => s.classification === 'unsure').length,
+    safe: localSenders.filter(s => s.classification === 'safe').length,
+  }), [localSenders])
+
+  function handleAction(actionType: 'trash' | 'mark_read' | 'archive') {
+    const selected = localSenders.filter(s => selectedSenders.has(s.sender_email))
+    if (selected.length === 0) return
+
+    dispatch({ type: 'SET_ACTIVE_ACTION', action: { type: actionType, senders: selected } })
+
+    fetch('/api/actions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: actionType,
+        senderEmails: selected.map(s => s.sender_email),
+      }),
+    }).catch((err: unknown) => {
+      if ((err as { status?: number })?.status === 401) {
+        router.push('/')
+      }
+    })
+  }
+
+  function handleUnsubscribeAndDelete() {
+    const selected = localSenders.filter(s => selectedSenders.has(s.sender_email))
+    if (selected.length === 0) return
+
+    dispatch({ type: 'SET_ACTIVE_ACTION', action: { type: 'unsub_delete', senders: selected } })
+
+    fetch('/api/unsubscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ senderEmails: selected.map(s => s.sender_email) }),
+    }).catch((err: unknown) => {
+      if ((err as { status?: number })?.status === 401) {
+        router.push('/')
+      }
+    })
+  }
+
+  function handleUnsubscribeOnly() {
+    const eligible = localSenders.filter(s =>
+      selectedSenders.has(s.sender_email) && s.has_unsubscribe_header
+    )
+    if (!eligible.length) return
+
+    dispatch({ type: 'SET_ACTIVE_ACTION', action: { type: 'unsub_only', senders: eligible } })
+
+    fetch('/api/unsubscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        senderEmails: eligible.map(s => s.sender_email),
+        deleteAfter: false,
+      }),
+    }).catch(() => {})
+  }
+
+  async function handleOverride(email: string, classification: Classification | null) {
+    dispatch({ type: 'SET_OVERRIDE', email, classification })
+    await fetch('/api/overrides', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ senderEmail: email, override: classification }),
+    }).catch(() => {})
+  }
+
+  function handleActionComplete({ processed: _processed, failed: _failed }: { processed: number; failed: number }) {
+    if (!activeAction) return
+    const emails = new Set(activeAction.senders.map(s => s.sender_email))
+
+    if (activeAction.type === 'trash') {
+      dispatch({ type: 'REMOVE_SENDERS', emails })
+    } else if (activeAction.type === 'mark_read') {
+      dispatch({ type: 'ZERO_UNREAD', emails })
+    } else if (activeAction.type === 'unsub_delete') {
+      const unsubscribedEmails = new Set(
+        activeAction.senders.filter(s => s.has_unsubscribe_header).map(s => s.sender_email)
+      )
+      dispatch({ type: 'MARK_UNSUBSCRIBED', emails: unsubscribedEmails })
+      // Zero email counts for senders without unsubscribe headers
+      const nonUnsubEmails = new Set(
+        activeAction.senders.filter(s => !s.has_unsubscribe_header).map(s => s.sender_email)
+      )
+      if (nonUnsubEmails.size > 0) dispatch({ type: 'ZERO_UNREAD', emails: nonUnsubEmails })
+    } else if (activeAction.type === 'unsub_only') {
+      // Only mark as unsubscribed — don't remove or zero email counts
+      dispatch({ type: 'MARK_UNSUBSCRIBED', emails })
+    }
+
+    dispatch({ type: 'DESELECT_ALL' })
+    dispatch({ type: 'SET_ACTIVE_ACTION', action: null })
+  }
+
+  // Empty: no senders at all
+  if (localSenders.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center flex-1 gap-6 px-6" style={{ paddingTop: 80 }}>
+        <div
+          className="neu-inset flex items-center justify-center"
+          style={{ width: 64, height: 64, borderRadius: 20 }}
+        >
+          <ScanLine size={28} color="#a55eea" strokeWidth={1.5} />
+        </div>
+        <div className="flex flex-col gap-2 text-center">
+          <h3 className="font-semibold text-white" style={{ fontSize: 17 }}>No senders yet</h3>
+          <p style={{ fontSize: 14, color: '#8888a0', lineHeight: 1.5 }}>
+            Scan your inbox to discover and classify your senders.
+          </p>
+        </div>
+        <Link
+          href="/dashboard"
+          className="neu-button flex items-center gap-2 px-6 py-3 text-white font-medium"
+          style={{ fontSize: 14 }}
+        >
+          <ScanLine size={16} strokeWidth={1.75} />
+          Scan My Inbox
+        </Link>
+      </div>
+    )
+  }
+
+  // Empty: all cleaned
+  const allCleaned = localSenders.every(s => s.is_unsubscribed)
+  if (allCleaned) {
+    return (
+      <div className="flex flex-col items-center justify-center flex-1 gap-4 px-6" style={{ paddingTop: 80 }}>
+        <span style={{ fontSize: 56 }}>🎉</span>
+        <div className="flex flex-col gap-2 text-center">
+          <h3 className="font-semibold text-white" style={{ fontSize: 17 }}>Inbox looking clean</h3>
+          <p style={{ fontSize: 14, color: '#8888a0' }}>You&apos;ve unsubscribed from all senders.</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Select All label
+  let selectAllLabel: string
+  if (allVisibleSelected) {
+    selectAllLabel = 'Deselect All'
+  } else if (selectedCount > 0) {
+    selectAllLabel = `${selectedCount} of ${localSenders.length} selected`
+  } else {
+    selectAllLabel = 'Select All'
+  }
+
+  function handleSelectAll() {
+    if (allVisibleSelected) {
+      dispatch({ type: 'DESELECT_ALL' })
+    } else {
+      dispatch({ type: 'SELECT_ALL_VISIBLE', visibleEmails })
+    }
+  }
+
+  return (
+    <div className="flex flex-col flex-1" style={{ minHeight: 0 }}>
+      {/* Filter tabs */}
+      <div style={{ paddingTop: 12, paddingBottom: 12 }}>
+        <FilterTabs
+          activeFilter={activeFilter}
+          counts={counts}
+          onFilterChange={filter => dispatch({ type: 'SET_FILTER', filter })}
+        />
+      </div>
+
+      {/* Select All row */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '8px 16px',
+          borderBottom: '1px solid #2c2c35',
+        }}
+      >
+        <button
+          onClick={handleSelectAll}
+          className="neu-button"
+          style={{
+            padding: '6px 12px',
+            fontSize: 13,
+            fontWeight: 500,
+            color: allVisibleSelected ? '#a55eea' : '#e8e8f0',
+          }}
+        >
+          {allVisibleSelected ? 'Deselect All' : 'Select All'}
+        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 13, color: '#8888a0' }}>
+            {selectedCount > 0 && selectedCount < localSenders.length
+              ? selectAllLabel
+              : `${visibleSenders.length.toLocaleString()} senders`}
+          </span>
+          <button
+            onClick={() => dispatch({ type: 'TOGGLE_HIDE_ZERO' })}
+            className="neu-button"
+            style={{ padding: '4px 10px', fontSize: 12, color: '#8888a0' }}
+            aria-pressed={hideZeroEmail}
+          >
+            {hideZeroEmail ? 'Show cleaned' : 'Hide cleaned'}
+          </button>
+        </div>
+      </div>
+
+      {/* Sender list */}
+      <div
+        className="overflow-y-auto flex-1"
+        style={{ paddingBottom: 120 }}
+      >
+        {visibleSenders.length === 0 ? (
+          <div className="flex flex-col items-center gap-3 px-6" style={{ paddingTop: 60 }}>
+            <span style={{ fontSize: 36 }}>🔍</span>
+            <p style={{ fontSize: 14, color: '#8888a0', textAlign: 'center' }}>
+              No {activeFilter} senders found
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3 px-4 py-3">
+            {visibleSenders.map(sender => (
+              <SenderCard
+                key={sender.id}
+                sender={sender}
+                isSelected={selectedSenders.has(sender.sender_email)}
+                onToggle={email => dispatch({ type: 'TOGGLE_SENDER', email })}
+                onOverride={handleOverride}
+                overriddenAs={state.overrides.get(sender.sender_email) ?? null}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Sticky action bar */}
+      <AnimatePresence>
+        {selectedCount > 0 && (
+          <ActionBar
+            key="action-bar"
+            selectedCount={selectedCount}
+            totalEmailCount={selectedTotalEmails}
+            hasUnsubscribable={hasUnsubscribable}
+            unsubscribableCount={unsubscribableCount}
+            onDeleteAll={() => handleAction('trash')}
+            onMarkRead={() => handleAction('mark_read')}
+            onArchive={() => handleAction('archive')}
+            onUnsubscribeAndDelete={handleUnsubscribeAndDelete}
+            onUnsubscribeOnly={handleUnsubscribeOnly}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Progress modal */}
+      <ProgressModal
+        isOpen={activeAction !== null}
+        actionType={activeAction?.type ?? 'trash'}
+        senders={activeAction?.senders ?? []}
+        onComplete={handleActionComplete}
+        onClose={() => dispatch({ type: 'SET_ACTIVE_ACTION', action: null })}
+      />
+
+      <InstallPrompt />
+    </div>
+  )
+}

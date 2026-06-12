@@ -1,0 +1,397 @@
+Stage 1:
+
+Master Project Context 
+App: Gmail inbox recovery tool — users sign in with Google, scan their inbox, classify senders as junk or safe, then bulk delete / unsubscribe / mark read / archive. Senders are shown as a list with checkboxes so the user can select exactly which senders to act on.
+
+Stack:
+
+Next.js 14+ (App Router, TypeScript)
+Supabase (auth, database, token storage)
+Vercel (hosting)
+Gmail API (read metadata, batch delete, batch modify, send unsubscribe emails)
+Gemini Flash API (free tier AI classification, 1,500 req/day)
+Rule-based classification fallback (must be indistinguishable in quality from AI)
+PWA (installable on mobile, add to home screen)
+
+UI:
+
+Neumorphism / Soft UI style throughout
+Base: black charcoal (#1a1a1e)
+Card surface: #222228
+Neumorphic shadows: light #2c2c35, dark #111116
+Accent colors are functional:
+Red #e84141 — delete, destructive actions
+Green #26de81 — safe senders, success
+Amber #ffb142 — unsure classification, warnings
+Blue #45aaf2 — unsubscribe, neutral info
+Purple #a55eea — selected state
+Font: Space Grotesk (Google Fonts) — used for all text
+No borders — depth is created entirely through shadows
+All interactive elements have subtle press animations (shadow inversion on click)
+
+Design tokens (Tailwind):
+
+// tailwind.config.ts additions
+
+colors: {
+
+  base: '#1a1a1e',
+
+  surface: '#222228',
+
+  'shadow-light': '#2c2c35',
+
+  'shadow-dark': '#111116',
+
+  accent: {
+
+    red: '#e84141',
+
+    green: '#26de81',
+
+    amber: '#ffb142',
+
+    blue: '#45aaf2',
+
+    purple: '#a55eea',
+
+  }
+
+},
+
+boxShadow: {
+
+  'neu': '6px 6px 12px #111116, -6px -6px 12px #2c2c35',
+
+  'neu-sm': '3px 3px 6px #111116, -3px -3px 6px #2c2c35',
+
+  'neu-inset': 'inset 4px 4px 8px #111116, inset -4px -4px 8px #2c2c35',
+
+  'neu-pressed': 'inset 3px 3px 6px #111116, inset -3px -3px 6px #2c2c35',
+
+}
+
+Database schema (Supabase):
+
+-- profiles: extends auth.users
+
+CREATE TABLE public.profiles (
+
+  id UUID REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
+
+  email TEXT NOT NULL,
+
+  google_refresh_token TEXT,
+
+  last_scan_at TIMESTAMPTZ,
+
+  created_at TIMESTAMPTZ DEFAULT NOW()
+
+);
+
+-- shared classification cache across all users
+
+CREATE TABLE public.sender_classifications (
+
+  domain TEXT PRIMARY KEY,
+
+  classification TEXT NOT NULL CHECK (classification IN ('junk', 'safe', 'unsure')),
+
+  confidence FLOAT,
+
+  method TEXT CHECK (method IN ('ai', 'rule_based')),
+
+  reason TEXT,
+
+  classified_at TIMESTAMPTZ DEFAULT NOW(),
+
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+
+);
+
+-- per-user sender scan results
+
+CREATE TABLE public.user_senders (
+
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+
+  sender_email TEXT NOT NULL,
+
+  sender_name TEXT,
+
+  domain TEXT,
+
+  email_count INTEGER DEFAULT 0,
+
+  unread_count INTEGER DEFAULT 0,
+
+  has_unsubscribe_header BOOLEAN DEFAULT FALSE,
+
+  unsubscribe_mailto TEXT,
+
+  unsubscribe_url TEXT,
+
+  unsubscribe_post BOOLEAN DEFAULT FALSE,
+
+  gmail_labels TEXT[],
+
+  classification TEXT CHECK (classification IN ('junk', 'safe', 'unsure')),
+
+  classification_method TEXT,
+
+  is_unsubscribed BOOLEAN DEFAULT FALSE,
+
+  last_scanned_at TIMESTAMPTZ DEFAULT NOW(),
+
+  UNIQUE(user_id, sender_email)
+
+);
+
+-- user overrides: manual safe/junk markings
+
+CREATE TABLE public.user_sender_overrides (
+
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+
+  sender_email TEXT NOT NULL,
+
+  override TEXT NOT NULL CHECK (override IN ('safe', 'junk')),
+
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+
+  PRIMARY KEY (user_id, sender_email)
+
+);
+
+Key behaviors:
+
+Users select/deselect individual senders via checkboxes before any action fires
+Actions never fire automatically without user selection + button press
+Bulk actions show real-time progress where possible, animated text fallback otherwise
+Classification: Gemini Flash first → rule-based fallback if quota exceeded
+Classification results cached in Supabase — same domain never classified twice
+Gmail OAuth uses sensitive scopes (gmail.modify) — unverified app 100-user cap is known and acceptable for now
+Gmail only (no Outlook)
+
+
+Stage 1: Project Foundation + Design System
+Read first: No CLAUDE.md yet — this stage creates it.
+
+Goal: Scaffold the entire project, install all dependencies, configure the design system, set up Supabase schema, and create the base layout. By the end of this stage the app boots, shows a styled landing page with a "Sign in with Google" button, and every design token is in place.
+
+Tasks:
+
+Scaffold Next.js project
+
+npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias "@/*"
+
+Install dependencies
+
+npm install @supabase/supabase-js @supabase/ssr
+
+npm install @google/generative-ai
+
+npm install googleapis
+
+npm install next-pwa
+
+npm install clsx tailwind-merge
+
+npm install lucide-react
+
+npm install framer-motion
+
+Environment variables — create .env.local:
+
+NEXT_PUBLIC_SUPABASE_URL=
+
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+
+SUPABASE_SERVICE_ROLE_KEY=
+
+GOOGLE_CLIENT_ID=
+
+GOOGLE_CLIENT_SECRET=
+
+GEMINI_API_KEY=
+
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+
+Tailwind config — replace tailwind.config.ts with the full design token system from the master context above. Add fontFamily: { sans: ['Space Grotesk', 'sans-serif'] }.
+
+Global CSS — src/app/globals.css:
+
+Import Space Grotesk from Google Fonts (@import or add to <head>)
+Set body { background-color: #1a1a1e; color: #e8e8f0; font-family: 'Space Grotesk', sans-serif; }
+Add base neumorphic component classes:
+
+.neu-card { background: #222228; box-shadow: 6px 6px 12px #111116, -6px -6px 12px #2c2c35; border-radius: 16px; }
+
+.neu-button { background: #222228; box-shadow: 6px 6px 12px #111116, -6px -6px 12px #2c2c35; border-radius: 12px; transition: all 0.15s ease; }
+
+.neu-button:active { box-shadow: inset 3px 3px 6px #111116, inset -3px -3px 6px #2c2c35; }
+
+.neu-inset { background: #1a1a1e; box-shadow: inset 4px 4px 8px #111116, inset -4px -4px 8px #2c2c35; border-radius: 12px; }
+
+Supabase client setup — create src/lib/supabase/:
+
+client.ts — browser client using createBrowserClient
+server.ts — server client using createServerClient with cookies
+middleware.ts — session refresh middleware
+
+Middleware — src/middleware.ts:
+
+Refresh Supabase session on every request
+Redirect unauthenticated users from /dashboard and /scan to /
+Redirect authenticated users from / to /dashboard
+
+Database schema — apply the full schema from master context to Supabase. Also add Row Level Security:
+
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can only access own profile" ON public.profiles FOR ALL USING (auth.uid() = id);
+
+ALTER TABLE public.user_senders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can only access own senders" ON public.user_senders FOR ALL USING (auth.uid() = user_id);
+
+ALTER TABLE public.user_sender_overrides ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can only access own overrides" ON public.user_sender_overrides FOR ALL USING (auth.uid() = user_id);
+
+-- sender_classifications is shared/read by all authenticated users
+
+ALTER TABLE public.sender_classifications ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Authenticated users can read classifications" ON public.sender_classifications FOR SELECT USING (auth.role() = 'authenticated');
+
+CREATE POLICY "Service role can write classifications" ON public.sender_classifications FOR ALL USING (auth.role() = 'service_role');
+
+Landing page — src/app/page.tsx:
+
+Full-screen centered layout on #1a1a1e background
+App icon/logo area (placeholder — a mail icon from lucide-react in a neu-card circle)
+Headline: "Your inbox, finally in control." — Space Grotesk, large, white
+Subheadline: "Scan, classify, and clean thousands of emails in minutes." — muted color #8888a0
+"Sign in with Google" button: neu-button style, Google logo SVG inline, white text
+Small footnote: "Gmail only. Your data never leaves your account." — very muted
+Fully centered, mobile-first (works on 375px width)
+
+Utility functions — src/lib/utils.ts:
+
+cn(...classes) — clsx + tailwind-merge helper
+extractDomain(email: string): string — get domain from email address
+formatCount(n: number): string — "1,204" formatting
+
+next.config.ts — basic PWA prep (full PWA config comes in Stage 8, just set it up to not break):
+
+const nextConfig = {
+
+  reactStrictMode: true,
+
+}
+
+export default nextConfig
+
+Files to create:
+
+src/
+
+  app/
+
+    globals.css
+
+    layout.tsx          ← root layout, loads Space Grotesk, sets metadata
+
+    page.tsx            ← landing page
+
+  lib/
+
+    supabase/
+
+      client.ts
+
+      server.ts
+
+    utils.ts
+
+  middleware.ts
+
+tailwind.config.ts
+
+.env.local              ← template with empty values
+
+Stage complete — update CLAUDE.md with:
+
+# Inbox Recovery Tool — Project State
+
+## Status: Stage 1 Complete — Foundation
+
+## Stack
+
+- Next.js 14 App Router, TypeScript, Tailwind
+
+- Supabase (auth + database)
+
+- Gmail API + Gemini Flash API (not yet integrated)
+
+- PWA (configured in Stage 8)
+
+## Design System
+
+- Neumorphism on charcoal base (#1a1a1e)
+
+- Surface: #222228, shadows: light #2c2c35 / dark #111116
+
+- Accents: red #e84141, green #26de81, amber #ffb142, blue #45aaf2, purple #a55eea
+
+- Font: Space Grotesk
+
+- CSS classes: .neu-card, .neu-button, .neu-button:active, .neu-inset
+
+## Database Tables
+
+- profiles (id, email, google_refresh_token, last_scan_at)
+
+- sender_classifications (domain, classification, confidence, method, reason)
+
+- user_senders (user_id, sender_email, domain, email_count, has_unsubscribe_header, unsubscribe_mailto, unsubscribe_url, unsubscribe_post, classification, is_unsubscribed)
+
+- user_sender_overrides (user_id, sender_email, override)
+
+## What Exists
+
+- Landing page with "Sign in with Google" button (not yet wired)
+
+- Full Tailwind design token system
+
+- Supabase client/server helpers
+
+- Auth middleware (redirects unauthenticated users)
+
+- Utility functions (cn, extractDomain, formatCount)
+
+## Environment Variables Needed
+
+NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+
+GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GEMINI_API_KEY, NEXT_PUBLIC_APP_URL
+
+## Not Yet Built
+
+- Google OAuth flow
+
+- Gmail API connection
+
+- Inbox scanner
+
+- Classification engine
+
+- Dashboard UI
+
+- Bulk actions
+
+- PWA manifest
+

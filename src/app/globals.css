@@ -1,0 +1,82 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  /* Colors */
+  --color-base: #1a1a1e;
+  --color-surface: #222228;
+  --color-shadow-light: #2c2c35;
+  --color-shadow-dark: #111116;
+  --color-accent-red: #e84141;
+  --color-accent-green: #26de81;
+  --color-accent-amber: #ffb142;
+  --color-accent-blue: #45aaf2;
+  --color-accent-purple: #a55eea;
+
+  /* Typography */
+  --font-sans: 'Space Grotesk', sans-serif;
+
+  /* Neumorphic shadows */
+  --shadow-neu: 6px 6px 12px #111116, -6px -6px 12px #2c2c35;
+  --shadow-neu-sm: 3px 3px 6px #111116, -3px -3px 6px #2c2c35;
+  --shadow-neu-inset: inset 4px 4px 8px #111116, inset -4px -4px 8px #2c2c35;
+  --shadow-neu-pressed: inset 3px 3px 6px #111116, inset -3px -3px 6px #2c2c35;
+}
+
+body {
+  background-color: #1a1a1e;
+  color: #e8e8f0;
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+/* Neumorphic base component classes */
+.neu-card {
+  background: #222228;
+  box-shadow: 6px 6px 12px #111116, -6px -6px 12px #2c2c35;
+  border-radius: 16px;
+}
+
+.neu-button {
+  background: #222228;
+  box-shadow: 6px 6px 12px #111116, -6px -6px 12px #2c2c35;
+  border-radius: 12px;
+  transition: all 0.15s ease;
+  cursor: pointer;
+  border: none;
+}
+
+.neu-button:active {
+  box-shadow: inset 3px 3px 6px #111116, inset -3px -3px 6px #2c2c35;
+}
+
+.neu-inset {
+  background: #1a1a1e;
+  box-shadow: inset 4px 4px 8px #111116, inset -4px -4px 8px #2c2c35;
+  border-radius: 12px;
+}
+
+.scrollbar-hide {
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.neu-button:focus-visible,
+a:focus-visible {
+  outline: 2px solid #a55eea;
+  outline-offset: 2px;
+}
+
+@layer utilities {
+  .text-muted { color: #8888a0; }
+  .text-dim   { color: #555568; }
+}

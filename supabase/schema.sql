@@ -1,0 +1,113 @@
+-- ============================================================
+-- Clearity — Database Schema
+-- Apply this in the Supabase SQL editor
+-- ============================================================
+
+-- profiles: extends auth.users
+CREATE TABLE public.profiles (
+  id UUID REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
+  email TEXT NOT NULL,
+  google_refresh_token TEXT,
+  last_scan_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- shared classification cache across all users
+CREATE TABLE public.sender_classifications (
+  domain TEXT PRIMARY KEY,
+  classification TEXT NOT NULL CHECK (classification IN ('junk', 'safe', 'unsure')),
+  confidence FLOAT,
+  method TEXT CHECK (method IN ('ai', 'rule_based')),
+  reason TEXT,
+  classified_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- per-user sender scan results
+CREATE TABLE public.user_senders (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  sender_email TEXT NOT NULL,
+  sender_name TEXT,
+  domain TEXT,
+  email_count INTEGER DEFAULT 0,
+  unread_count INTEGER DEFAULT 0,
+  has_unsubscribe_header BOOLEAN DEFAULT FALSE,
+  unsubscribe_mailto TEXT,
+  unsubscribe_url TEXT,
+  unsubscribe_post BOOLEAN DEFAULT FALSE,
+  gmail_labels TEXT[],
+  classification TEXT CHECK (classification IN ('junk', 'safe', 'unsure')),
+  classification_method TEXT,
+  is_unsubscribed BOOLEAN DEFAULT FALSE,
+  last_scanned_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, sender_email)
+);
+
+-- user overrides: manual safe/junk markings
+CREATE TABLE public.user_sender_overrides (
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  sender_email TEXT NOT NULL,
+  override TEXT NOT NULL CHECK (override IN ('safe', 'junk')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_id, sender_email)
+);
+
+-- ============================================================
+-- Row Level Security
+-- ============================================================
+
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users can only access own profile"
+  ON public.profiles FOR ALL
+  USING (auth.uid() = id);
+
+ALTER TABLE public.user_senders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users can only access own senders"
+  ON public.user_senders FOR ALL
+  USING (auth.uid() = user_id);
+
+ALTER TABLE public.user_sender_overrides ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users can only access own overrides"
+  ON public.user_sender_overrides FOR ALL
+  USING (auth.uid() = user_id);
+
+ALTER TABLE public.sender_classifications ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can read classifications"
+  ON public.sender_classifications FOR SELECT
+  USING (auth.role() = 'authenticated');
+CREATE POLICY "Service role can write classifications"
+  ON public.sender_classifications FOR ALL
+  USING (auth.role() = 'service_role');
+
+-- scan progress tracking (one row per user, upserted by service role during scan)
+CREATE TABLE public.scan_jobs (
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE PRIMARY KEY,
+  status TEXT DEFAULT 'idle',
+  phase TEXT,
+  scanned INTEGER DEFAULT 0,
+  total INTEGER DEFAULT 0,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ
+);
+
+ALTER TABLE public.scan_jobs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users can only access own scan job"
+  ON public.scan_jobs FOR ALL
+  USING (auth.uid() = user_id);
+
+-- ============================================================
+-- Stage 6 Migration: Bulk Actions
+-- Run these ALTER statements in the Supabase SQL editor
+-- ============================================================
+ALTER TABLE public.scan_jobs
+  ADD COLUMN IF NOT EXISTS action_type TEXT,
+  ADD COLUMN IF NOT EXISTS processed INTEGER DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS sender_statuses JSONB DEFAULT '{}'::jsonb;
+
+-- ============================================================
+-- Stage 7 Migration: Smart Unsubscribe
+-- Run these ALTER statements in the Supabase SQL editor
+-- ============================================================
+ALTER TABLE public.scan_jobs
+  ADD COLUMN IF NOT EXISTS unsubscribe_statuses JSONB DEFAULT '{}'::jsonb;
