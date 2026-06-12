@@ -38,14 +38,20 @@ export interface ScanMessageIdsOptions {
 /** ~4.5 min per Vercel invocation — leave headroom under the 5 min limit. */
 export const CHUNK_TIME_BUDGET_MS = 270_000
 
-// Gmail: 6,000 quota units/min/user; messages.get = 20 units → max ~300/min.
-// Target ~200/min (4,000 units/min) for marathon 200k scans.
-const BATCH_SIZE = 20
-const PARALLEL = 8
-const WAVE_DELAY_MS = 500
-const BATCH_DELAY_MS = 12_000
-const QUOTA_RETRY_MS = 65_000
-const MAX_RETRIES = 5
+// Gmail quota reality (per the official "Usage limits" table):
+//   • Per-user rate limit: 250 quota units / user / SECOND (a moving average).
+//   • messages.get = 5 units → ceiling ≈ 50 msg/sec/user.
+// We pace adaptively well under that (targetRps × 5 units/sec) so a 200k scan
+// finishes in ~2–3 hours instead of hammering the limit or crawling for a day.
+const PARALLEL = 10            // concurrent messages.get per wave
+const START_RPS = 24          // ~120 units/sec — safe starting rate
+const MIN_RPS = 8             // floor after repeated 429s
+const MAX_RPS = 40            // ~200 units/sec — ceiling we ramp toward
+const RAMP_AFTER_WAVES = 6    // clean waves before nudging the rate up
+const QUOTA_BACKOFF_MS = 20_000
+const TRANSIENT_RETRY_MS = 2_000
+const MAX_TRANSIENT_RETRIES = 3
+const PROGRESS_EVERY = 200    // throttle DB progress writes
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -61,11 +67,66 @@ function getHttpStatus(err: unknown): number | undefined {
     ?? (err as { code?: number })?.code
 }
 
-async function fetchMessageWithRetry(
+function isRateLimit(err: unknown): boolean {
+  const status = getHttpStatus(err)
+  if (status === 429) return true
+  // Gmail sometimes signals user-rate limits as 403 with a specific reason.
+  const reason = (err as { errors?: Array<{ reason?: string }> })?.errors?.[0]?.reason
+  return status === 403 && (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded')
+}
+
+/** Messages deleted/moved between listing and fetching return 404/410 — skip them. */
+function isGone(err: unknown): boolean {
+  const status = getHttpStatus(err)
+  return status === 404 || status === 410
+}
+
+function isTransient(err: unknown): boolean {
+  const status = getHttpStatus(err)
+  return status === 500 || status === 502 || status === 503 || status === 504
+}
+
+/**
+ * Adaptive token-rate controller. Stays just below Gmail's per-user limit:
+ * backs off hard on 429/rate signals, then gently ramps back up.
+ */
+class AdaptiveThrottle {
+  rps = START_RPS
+  private streak = 0
+
+  /** Target wall-clock duration for a wave of `PARALLEL` requests. */
+  waveIntervalMs() {
+    return (PARALLEL / this.rps) * 1000
+  }
+
+  backoffMs() {
+    return QUOTA_BACKOFF_MS
+  }
+
+  onCleanWave() {
+    this.streak++
+    if (this.streak >= RAMP_AFTER_WAVES) {
+      this.rps = Math.min(MAX_RPS, this.rps + 2)
+      this.streak = 0
+    }
+  }
+
+  onRateLimit() {
+    this.rps = Math.max(MIN_RPS, Math.floor(this.rps / 2))
+    this.streak = 0
+  }
+}
+
+interface FetchOutcome {
+  message: gmail_v1.Schema$Message | null  // null = permanently gone (skip)
+}
+
+/** Fetch one message; retry transient 5xx; surface rate-limit/gone via throw/null. */
+async function fetchMessageOnce(
   gmail: gmail_v1.Gmail,
   id: string,
   attempt = 0
-): Promise<gmail_v1.Schema$Message> {
+): Promise<FetchOutcome> {
   try {
     const res = await gmail.users.messages.get({
       userId: 'me',
@@ -74,40 +135,67 @@ async function fetchMessageWithRetry(
       metadataHeaders: ['From', 'List-Unsubscribe', 'List-Unsubscribe-Post'],
       fields: 'id,labelIds,payload/headers',
     })
-    return res.data
+    return { message: res.data }
   } catch (err: unknown) {
-    if (getHttpStatus(err) === 429 && attempt < MAX_RETRIES) {
-      await sleep(QUOTA_RETRY_MS)
-      return fetchMessageWithRetry(gmail, id, attempt + 1)
+    if (isGone(err)) return { message: null }
+    if (isTransient(err) && attempt < MAX_TRANSIENT_RETRIES) {
+      await sleep(TRANSIENT_RETRY_MS * (attempt + 1))
+      return fetchMessageOnce(gmail, id, attempt + 1)
     }
-    throw err
+    throw err  // rate-limit and unexpected errors bubble to the wave handler
   }
 }
 
+/**
+ * Fetch a slice of IDs using the adaptive throttle. Rate-limited requests are
+ * retried (only the failed ones); permanently-gone messages are skipped.
+ */
 async function fetchBatch(
   gmail: gmail_v1.Gmail,
   ids: string[],
+  throttle: AdaptiveThrottle,
+  signal?: AbortSignal,
   onRateLimited?: () => Promise<void>
 ): Promise<gmail_v1.Schema$Message[]> {
   const results: gmail_v1.Schema$Message[] = []
 
   for (let i = 0; i < ids.length; i += PARALLEL) {
-    const wave = ids.slice(i, i + PARALLEL)
-    try {
-      const waveResults = await Promise.all(
-        wave.map(id => fetchMessageWithRetry(gmail, id))
+    let pending = ids.slice(i, i + PARALLEL)
+    let rateLimitedThisWave = false
+
+    while (pending.length > 0) {
+      checkCancelled(signal)
+      const waveStart = Date.now()
+      const settled = await Promise.allSettled(
+        pending.map(id => fetchMessageOnce(gmail, id))
       )
-      results.push(...waveResults)
-    } catch (err: unknown) {
-      if (getHttpStatus(err) === 429) {
-        await onRateLimited?.()
-        await sleep(QUOTA_RETRY_MS)
-        i -= PARALLEL
-        continue
+
+      const retry: string[] = []
+      for (let k = 0; k < settled.length; k++) {
+        const outcome = settled[k]
+        if (outcome.status === 'fulfilled') {
+          if (outcome.value.message) results.push(outcome.value.message)
+          // null → message gone, skip silently
+        } else if (isRateLimit(outcome.reason)) {
+          retry.push(pending[k])
+        } else {
+          throw outcome.reason
+        }
       }
-      throw err
+
+      if (retry.length === 0) {
+        if (!rateLimitedThisWave) throttle.onCleanWave()
+        const remaining = throttle.waveIntervalMs() - (Date.now() - waveStart)
+        if (remaining > 0 && i + PARALLEL < ids.length) await sleep(remaining)
+        pending = []
+      } else {
+        rateLimitedThisWave = true
+        throttle.onRateLimit()
+        await onRateLimited?.()
+        await sleep(throttle.backoffMs())
+        pending = retry
+      }
     }
-    if (i + PARALLEL < ids.length) await sleep(WAVE_DELAY_MS)
   }
 
   return results
@@ -234,22 +322,19 @@ export async function scanMessageIds(
   } = options
 
   const total = ids.length
-  let rateLimitNotified = false
   let cursor = startIndex
   const chunkEmails = new Set<string>()
+  const throttle = new AdaptiveThrottle()
 
-  const notifyRateLimited = async () => {
-    if (rateLimitNotified) return
-    rateLimitNotified = true
-    await onRateLimited?.()
-  }
-
-  for (let i = startIndex; i < ids.length; i += BATCH_SIZE) {
+  // Process one wave of `PARALLEL` IDs at a time so cursor/progress advance
+  // smoothly and we can stop cleanly at the Vercel time budget (deadline).
+  let lastReported = startIndex
+  for (let i = startIndex; i < ids.length; i += PARALLEL) {
     if (Date.now() >= deadline) break
     checkCancelled(signal)
 
-    const chunk = ids.slice(i, i + BATCH_SIZE)
-    const messages = await fetchBatch(gmail, chunk, notifyRateLimited)
+    const wave = ids.slice(i, i + PARALLEL)
+    const messages = await fetchBatch(gmail, wave, throttle, signal, onRateLimited)
 
     for (const msg of messages) {
       const headers = msg.payload?.headers ?? []
@@ -259,14 +344,15 @@ export async function scanMessageIds(
       if (parsed) chunkEmails.add(parsed.email)
     }
 
-    cursor = i + chunk.length
-    await onProgress(cursor, total)
-
-    if (i + BATCH_SIZE < ids.length) {
-      await sleep(BATCH_DELAY_MS)
-      checkCancelled(signal)
+    cursor = i + wave.length
+    if (cursor - lastReported >= PROGRESS_EVERY || cursor >= ids.length) {
+      lastReported = cursor
+      await onProgress(cursor, total)
     }
   }
+
+  // Always flush the final position so the caller persists an accurate cursor.
+  if (cursor !== lastReported) await onProgress(cursor, total)
 
   const chunkSenders = [...chunkEmails]
     .map(email => senderMap.get(email))

@@ -17,7 +17,9 @@ import { loadSendersIntoMap, upsertSendersList } from '@/lib/scan/persistence'
 import { tryAcquireChunkLock, releaseChunkLock } from '@/lib/scan/chunkLock'
 import { ScanCancelledError } from '@/types'
 
-const ID_SLICE = 4000
+// One slice per worker invocation. The scan loop stops at the Vercel time budget
+// regardless, so this just caps memory and how far a single chunk reads ahead.
+const ID_SLICE = 7000
 
 function adminClient() {
   return createAdminClient(
@@ -41,6 +43,13 @@ export interface RunScanChunkOptions {
   resume?: boolean
   /** Internal worker calls skip lock acquisition (already held). */
   skipLock?: boolean
+  /**
+   * Background continuation (worker/cron). Such calls must only RESUME an
+   * in-progress scan — never start a fresh or incremental one. This prevents a
+   * stray continuation (e.g. fired moments before the user cancels) from wiping
+   * saved senders and silently restarting a full rescan.
+   */
+  continuation?: boolean
 }
 
 export interface RunScanChunkResult {
@@ -115,7 +124,12 @@ export async function runScanChunk(
   userId: string,
   options: RunScanChunkOptions = {}
 ): Promise<RunScanChunkResult> {
-  const { forceFull = false, resume: resumeRequested = false, skipLock = false } = options
+  const {
+    forceFull = false,
+    resume: resumeRequested = false,
+    skipLock = false,
+    continuation = false,
+  } = options
   const admin = adminClient()
 
   if (!skipLock) {
@@ -154,6 +168,13 @@ export async function runScanChunk(
       !canResume &&
       !!profile?.last_scan_at &&
       !!profile?.gmail_history_id
+
+    // A background continuation may only resume in-progress chunked work. If
+    // there's nothing to resume (scan completed, was cancelled, or was already
+    // superseded by a fresh start), bail out rather than launching new work.
+    if (continuation && !canResume) {
+      return { skipped: true }
+    }
 
     globalCursor = cursor
 

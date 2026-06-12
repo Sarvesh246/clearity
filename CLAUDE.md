@@ -83,6 +83,8 @@ Fill in `.env.local`:
 - GOOGLE_CLIENT_SECRET
 - GEMINI_API_KEY
 - NEXT_PUBLIC_APP_URL
+- SCAN_WORKER_SECRET — REQUIRED for background scan continuation (tab-closed long scans). Shared bearer secret the app uses to call its own `/api/scan/continue` worker. Must match between the app and itself; set the SAME value in Vercel.
+- CRON_SECRET — REQUIRED for the resume-scans cron safety net. Vercel auto-sends `Authorization: Bearer <CRON_SECRET>` to scheduled crons when this env var is set. Set in Vercel.
 
 - Bulk actions: trash, mark read, archive — all working via Gmail API (`src/app/api/actions/route.ts`)
   - `getMessageIdsForSenders` — paginates messages.list per sender, max 5 concurrent (`src/lib/gmail/getMessageIds.ts`)
@@ -147,22 +149,40 @@ Fill in `.env.local`:
 - ETA in ProgressModal: rate-based estimated time remaining shown for bulk actions after 100+ processed
 - Checkbox micro-animation: scale pulse on toggle via Framer Motion
 
+## Stage 11 — Resumable & Background Scans (200k+ inboxes)
+
+### Architecture
+- Listing and reading are split into time-boxed chunks. Each Vercel invocation runs ~270s (`CHUNK_TIME_BUDGET_MS`), then schedules the next chunk server-side via `waitUntil` → `POST /api/scan/continue` (`src/lib/scan/scheduleContinuation.ts`). Scans continue with the tab closed.
+- Message IDs persist in `scan_message_ids` (one row per ID); progress/cursor/page-token persist in `scan_jobs`. Senders are upserted and classified per chunk, so partial results are always saved and reviewable.
+- Cron safety net `*/2` (`/api/cron/resume-scans`, `vercel.json`) re-kicks scans that stalled (worker timeout, network drop). NOTE: Vercel Hobby caps crons at once/day — the `waitUntil` chain is the primary driver and works on any plan; the cron is backup.
+- Incremental sync: after a full scan, `gmail_history_id` is stored; "Sync New Emails" uses `history.list` to fetch only new messages.
+
+### Reliability fixes (rate limits + start/stop correctness)
+- **Atomic chunk lock** (`src/lib/scan/chunkLock.ts`): single compare-and-swap UPDATE (`chunk_locked_at IS NULL OR < stale`) guarantees only one chunk runs per user. The previous check-then-update was racy and let two workers run concurrently → doubled Gmail request rate → 429s. The lock no longer gates on `status='scanning'`, so fresh starts/rescans after complete/cancel/idle actually run (previously silently `skipped`).
+- **Adaptive throttle** (`src/lib/gmail/scanner.ts`): paces `messages.get` against Gmail's real limit (250 quota units/user/sec; get = 5 units). Starts ~24 msg/s (~120 units/s), ramps to 40, halves on any 429/rate signal, then re-ramps — stays just below the ceiling. Replaces the old fixed 12s/batch delay (~92 msg/min → 200k took ~36h; now ~2–3h).
+- **Transient resilience**: 404/410 (message deleted/moved mid-scan) are skipped, not fatal; 5xx retried with backoff. Prevents long scans crashing near the end.
+- **Continuation guard** (`runScanChunk` `continuation` flag): background workers only RESUME in-progress scans — never start a fresh/incremental one. Stops a stray continuation (fired just before a cancel) from wiping `user_senders` and restarting a full rescan.
+
+### Stage 11 known limitations
+- Requires `SCAN_WORKER_SECRET` + `CRON_SECRET` env vars (app + Vercel) and the Stage 11 SQL migration applied; without the worker secret, scans stall when the tab closes.
+- Clicking "Scan" within ~3s of "Cancel" can no-op once (old chunk still releasing the lock) — click again; it self-heals.
+- Intra-slice crash re-scans up to one slice (~7k msgs); upserts are idempotent so no data corruption.
+
 ### Known limitations
-- Scan cancellation does not save partial results (scan cleared user_senders at start; cancelled = empty state)
+- Cancelling a scan now SAVES partial results (senders scanned so far are classified and kept); the empty-state cancel was fixed in Stage 11.
 - Sender override optimistic updates persist if POST `/api/overrides` fails (silently, until page refresh)
 - Estimated time is rate-based and unreliable for the first ~10% of a scan or bulk action
 - Gmail OAuth app is unverified (100-user cap for external users until Google verification)
 - Gmail only — no Outlook/Exchange support
 
 ### Future work
-- Persist partial scan results on cancellation (requires intermediate DB upserts during scan)
 - Google OAuth verification (requires Google review, privacy policy, brand assets)
 - Payments / subscription gating
 - Outlook support (Microsoft Graph API)
 - Toast notifications for override saves and scan cancellation
 
 ### Deployment (Vercel)
-- Set all env vars from `.env.local` in Vercel project settings
-- Supabase: apply `supabase/schema.sql` manually in SQL editor
+- Set all env vars from `.env.local` in Vercel project settings — including `SCAN_WORKER_SECRET` and `CRON_SECRET` (background scans stall without them)
+- Supabase: apply `supabase/schema.sql` manually in SQL editor — the Stage 11 migration (scan_message_ids table, scan_jobs cursor/list_page_token/list_complete/chunk_locked_at/updated_at, profiles.gmail_history_id) is REQUIRED for resumable scans
 - Google OAuth: add production domain to Authorized Redirect URIs in Google Cloud Console
 - PWA: icons in `public/icons/` are served statically — no build step needed

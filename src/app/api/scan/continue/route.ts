@@ -21,7 +21,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'userId required' }, { status: 400 })
   }
 
-  const result = await runScanChunk(userId, {})
+  const result = await runScanChunk(userId, { continuation: true })
 
   if (result.skipped) {
     return NextResponse.json({ ok: true, skipped: true })
