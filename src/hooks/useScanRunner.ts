@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { hasIncompleteScan } from '@/lib/scan/scanState'
 import type { ScanProgress } from '@/types'
 
 interface UseScanRunnerOptions {
@@ -19,10 +20,10 @@ const STALE_KICK_MS = 3 * 60 * 1000
 function scanNeedsContinuation(data: ScanProgress): boolean {
   if (data.status === 'cancelled') return false
   if (data.action_type) return false
-  if (data.status === 'error' && data.phase.includes('resume')) return true
+  if (data.status === 'error' && data.phase.includes('will resume automatically')) return true
   if (data.status !== 'scanning' && data.status !== 'error') return false
   if (data.list_complete === false) return true
-  const checkpoint = Math.max(data.cursor ?? 0, data.scanned ?? 0)
+  const checkpoint = data.cursor ?? 0
   if (data.total > 0 && checkpoint < data.total) return true
   if (data.phase.toLowerCase().includes('fetching email list')) return true
   if (data.phase.toLowerCase().includes('rebuilding email list')) return true
@@ -30,11 +31,11 @@ function scanNeedsContinuation(data: ScanProgress): boolean {
 }
 
 export function canContinueScan(data: ScanProgress): boolean {
-  if (data.status === 'cancelled' || data.status === 'complete') return false
-  const checkpoint = Math.max(data.cursor ?? 0, data.scanned ?? 0)
-  if (data.total <= 0 || checkpoint >= data.total) return false
+  if (data.status === 'complete') return false
+  if (!hasIncompleteScan(data)) return false
   if (data.status === 'scanning') return true
-  if (data.status === 'error' && data.phase.includes('resume')) return true
+  if (data.status === 'error' && data.phase.includes('will resume automatically')) return true
+  if (data.status === 'cancelled') return true
   return false
 }
 
@@ -136,7 +137,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
         setIsPaused(false)
         stopPolling()
         if (wasActive) onComplete?.()
-      } else if (data.status === 'error' && !data.phase.includes('resume')) {
+      } else if (data.status === 'error' && !data.phase.includes('will resume automatically')) {
         activeRef.current = false
         setIsScanning(false)
         stopPolling()
@@ -145,7 +146,11 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
           return
         }
         setScanError(true)
-      } else if (data.status === 'scanning' && scanNeedsContinuation(data)) {
+      } else if (
+        (data.status === 'scanning' ||
+          (data.status === 'error' && data.phase.includes('will resume automatically'))) &&
+        scanNeedsContinuation(data)
+      ) {
         setIsScanning(true)
         setScanError(false)
       }
@@ -214,6 +219,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       if (data.status === 'complete' || data.status === 'cancelled') {
         setIsScanning(false)
         setIsPaused(false)
+        if (data.status === 'cancelled') setProgress(data)
         return
       }
 

@@ -302,32 +302,35 @@ export async function scanMessageIds(
   const chunkEmails = new Set<string>()
   const throttle = new AdaptiveThrottle()
 
-  // Process one wave of `PARALLEL` IDs at a time so cursor/progress advance
-  // smoothly and we can stop cleanly at the Vercel time budget (deadline).
   let lastReported = startIndex
-  for (let i = startIndex; i < ids.length; i += PARALLEL) {
-    if (Date.now() >= deadline) break
-    checkCancelled(signal)
+  try {
+    for (let i = startIndex; i < ids.length; i += PARALLEL) {
+      if (Date.now() >= deadline) break
+      checkCancelled(signal)
 
-    const wave = ids.slice(i, i + PARALLEL)
-    const messages = await fetchBatch(gmail, wave, throttle, signal, onRateLimited)
+      const wave = ids.slice(i, i + PARALLEL)
+      const messages = await fetchBatch(gmail, wave, throttle, signal, onRateLimited)
 
-    for (const msg of messages) {
-      const headers = msg.payload?.headers ?? []
-      const fromHeader = headers.find(h => h.name?.toLowerCase() === 'from')?.value ?? ''
-      const parsed = parseFrom(fromHeader)
-      mergeMessageIntoSenderMap(senderMap, msg)
-      if (parsed) chunkEmails.add(parsed.email)
+      for (const msg of messages) {
+        const headers = msg.payload?.headers ?? []
+        const fromHeader = headers.find(h => h.name?.toLowerCase() === 'from')?.value ?? ''
+        const parsed = parseFrom(fromHeader)
+        mergeMessageIntoSenderMap(senderMap, msg)
+        if (parsed) chunkEmails.add(parsed.email)
+      }
+
+      cursor = i + wave.length
+      if (cursor - lastReported >= PROGRESS_EVERY || cursor >= ids.length) {
+        lastReported = cursor
+        await onProgress(cursor, total)
+      }
     }
-
-    cursor = i + wave.length
-    if (cursor - lastReported >= PROGRESS_EVERY || cursor >= ids.length) {
-      lastReported = cursor
-      await onProgress(cursor, total)
-    }
+  } catch (err) {
+    // User cancelled — return partial progress so the caller can upsert senders
+    // for everything read so far in this slice (don't throw away mid-chunk work).
+    if (!(err instanceof ScanCancelledError)) throw err
   }
 
-  // Always flush the final position so the caller persists an accurate cursor.
   if (cursor !== lastReported) await onProgress(cursor, total)
 
   const chunkSenders = [...chunkEmails]

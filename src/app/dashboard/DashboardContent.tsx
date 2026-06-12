@@ -76,10 +76,11 @@ export default function DashboardContent({
   }
 
   const isListing = isRescanning && progress.list_complete === false
+  const displayScanned = Math.max(progress.cursor ?? 0, progress.scanned ?? 0)
   const pct = isListing
     ? 0
     : progress.total > 0
-      ? Math.min(99, Math.round((progress.scanned / progress.total) * 100))
+      ? Math.min(99, Math.round((displayScanned / progress.total) * 100))
       : 0
   const hasScan = senderCount > 0
 
@@ -132,6 +133,17 @@ export default function DashboardContent({
             <ArrowRight size={16} strokeWidth={2} color="#45aaf2" />
             Review Saved Senders
           </Link>
+          {canContinue && (
+            <button
+              onClick={() => startRescan({ resume: true })}
+              disabled={isRescanning}
+              className="neu-button w-full flex items-center justify-center gap-2 min-h-[44px] px-6 py-3 font-medium text-sm"
+              style={{ color: '#45aaf2' }}
+            >
+              <RefreshCw size={16} strokeWidth={1.75} />
+              Continue Scan ({displayScanned.toLocaleString()} / {progress.total.toLocaleString()})
+            </button>
+          )}
         </motion.div>
       )}
 
@@ -174,7 +186,7 @@ export default function DashboardContent({
                 <p className="text-xs" style={{ color: '#555568' }}>
                   {isListing
                     ? `${progress.total.toLocaleString()} emails found so far`
-                    : `${pct}% — ${progress.scanned.toLocaleString()} / ${progress.total.toLocaleString()} emails`}
+                    : `${pct}% — ${displayScanned.toLocaleString()} / ${progress.total.toLocaleString()} emails`}
                 </p>
                 <button
                   onClick={cancelScan}
@@ -313,7 +325,7 @@ export default function DashboardContent({
                 style={{ color: '#45aaf2' }}
               >
                 <RefreshCw size={16} strokeWidth={1.75} />
-                Continue Scan ({progress.scanned.toLocaleString()} / {progress.total.toLocaleString()})
+                Continue Scan ({displayScanned.toLocaleString()} / {progress.total.toLocaleString()})
               </button>
             )}
             <button
@@ -334,29 +346,36 @@ export default function DashboardContent({
               Full rescan (slow — re-reads every email)
             </button>
           </>
-        ) : (
+        ) : canContinue ? (
           <>
             <button
-              onClick={() => startRescan({ full: true })}
+              onClick={() => startRescan({ resume: true })}
               disabled={isRescanning}
               className="neu-button w-full flex items-center justify-center gap-2 min-h-[52px] px-6 py-4 text-white font-semibold text-base"
               style={{ boxShadow: '0 0 20px #45aaf240, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
             >
-              <ScanLine size={18} strokeWidth={1.75} color="#45aaf2" />
-              {isRescanning ? 'Scanning…' : 'Scan My Inbox'}
+              <RefreshCw size={18} strokeWidth={1.75} color="#45aaf2" />
+              {isRescanning ? 'Scanning…' : `Continue Scan${progress.total > 0 ? ` (${displayScanned.toLocaleString()} / ${progress.total.toLocaleString()})` : ''}`}
             </button>
-            {canContinue && (
-              <button
-                onClick={() => startRescan({ resume: true })}
-                disabled={isRescanning}
-                className="neu-button w-full flex items-center justify-center gap-2 min-h-[48px] px-6 py-3 font-medium text-sm"
-                style={{ color: '#45aaf2' }}
-              >
-                <RefreshCw size={16} strokeWidth={1.75} />
-                Continue Scan ({progress.scanned.toLocaleString()} / {progress.total.toLocaleString()})
-              </button>
-            )}
+            <button
+              onClick={() => startRescan({ full: true })}
+              disabled={isRescanning}
+              className="neu-button w-full flex items-center justify-center gap-2 min-h-[44px] px-6 py-3 font-medium text-xs"
+              style={{ color: '#555568' }}
+            >
+              Start over (full rescan)
+            </button>
           </>
+        ) : (
+          <button
+            onClick={() => startRescan({ full: true })}
+            disabled={isRescanning}
+            className="neu-button w-full flex items-center justify-center gap-2 min-h-[52px] px-6 py-4 text-white font-semibold text-base"
+            style={{ boxShadow: '0 0 20px #45aaf240, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
+          >
+            <ScanLine size={18} strokeWidth={1.75} color="#45aaf2" />
+            {isRescanning ? 'Scanning…' : 'Scan My Inbox'}
+          </button>
         )}
       </motion.div>
       </div>

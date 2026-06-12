@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { calculateHealthScore } from '@/lib/scoring'
+import { hasIncompleteScan } from '@/lib/scan/scanState'
 import DashboardContent from './DashboardContent'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import { fetchAllRows } from '@/lib/supabase/fetchAllRows'
@@ -23,12 +24,13 @@ export default async function DashboardPage() {
         .order('id', { ascending: true })
         .range(from, to)
     ).catch(() => [] as UserSender[]),
-    supabase.from('scan_jobs').select('status, scanned, total').eq('user_id', user.id).maybeSingle(),
+    supabase.from('scan_jobs').select('status, scanned, total, cursor, list_complete, list_page_token').eq('user_id', user.id).maybeSingle(),
   ])
   const health = calculateHealthScore(allSenders)
   const isPartialScan =
     allSenders.length > 0 &&
     scanJob != null &&
+    hasIncompleteScan(scanJob) &&
     (scanJob.status === 'cancelled' || scanJob.status === 'scanning' || scanJob.status === 'error')
 
   const junkCount      = allSenders.filter(s => s.classification === 'junk').length
