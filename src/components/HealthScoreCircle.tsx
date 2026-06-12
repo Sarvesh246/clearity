@@ -30,7 +30,7 @@ export default function HealthScoreCircle({ score, color, label, pulse = false }
   }, [score])
 
   const inner = (
-    <svg viewBox="0 0 120 120" width="160" height="160" style={{ display: 'block' }}>
+    <svg viewBox="0 0 120 120" width="176" height="176" style={{ display: 'block', maxWidth: '100%' }}>
       {/* Track ring */}
       <circle
         cx="60" cy="60" r={RADIUS}

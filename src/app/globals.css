@@ -62,6 +62,17 @@ body {
   flex: 1;
 }
 
+/* Wider shell for the dashboard's two-column desktop layout */
+.app-container--wide {
+  max-width: 672px;
+}
+
+@media (min-width: 1024px) {
+  .app-container--wide {
+    max-width: 1040px;
+  }
+}
+
 /* Neumorphic base component classes */
 .neu-card {
   background: #222228;

@@ -7,10 +7,17 @@ interface Props {
 
 export default function StatCard({ icon, value, label, color }: Props) {
   return (
-    <div className="neu-card flex flex-col items-center gap-2 !p-3 min-w-0">
+    <div className="neu-card flex flex-col items-center gap-2.5 !p-4 min-w-0">
       <div
-        className="neu-inset flex items-center justify-center flex-shrink-0"
-        style={{ width: 40, height: 40, borderRadius: 12, color }}
+        className="flex items-center justify-center flex-shrink-0"
+        style={{
+          width: 44,
+          height: 44,
+          borderRadius: 13,
+          color,
+          background: '#1a1a1e',
+          boxShadow: 'inset 3px 3px 6px #111116, inset -3px -3px 6px #2c2c35',
+        }}
       >
         {icon}
       </div>

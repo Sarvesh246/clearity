@@ -84,7 +84,7 @@ export default function DashboardContent({
   const hasScan = senderCount > 0
 
   return (
-    <div className="w-full flex flex-col gap-5">
+    <div className="w-full flex flex-col gap-5 lg:gap-6">
       {/* Header */}
       <motion.div
         custom={0} initial="hidden" animate="visible" variants={cardVariants}
@@ -210,10 +210,12 @@ export default function DashboardContent({
         </motion.div>
       )}
 
+      {/* Main grid — single column on mobile, health hero + details on desktop */}
+      <div className="grid gap-5 lg:gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:items-stretch">
       {/* Health score card */}
       <motion.div
         custom={1} initial="hidden" animate="visible" variants={cardVariants}
-        className="neu-card flex flex-col items-center gap-3 py-6"
+        className="neu-card flex flex-col items-center justify-center gap-4 py-8 lg:py-10 lg:h-full"
       >
         <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: '#555568' }}>
           Inbox Health Score
@@ -225,16 +227,18 @@ export default function DashboardContent({
           pulse={hasScan ? health!.pulse : false}
         />
         {!hasScan && (
-          <p className="text-sm text-center" style={{ color: '#8888a0' }}>
+          <p className="text-sm text-center max-w-[16rem]" style={{ color: '#8888a0' }}>
             Scan your inbox to see your health score
           </p>
         )}
       </motion.div>
 
+      {/* Right column — details + actions */}
+      <div className="flex flex-col gap-5 lg:gap-6">
       {/* Stat cards */}
       <motion.div
         custom={2} initial="hidden" animate="visible" variants={cardVariants}
-        className="grid grid-cols-3 gap-3"
+        className="grid grid-cols-3 gap-3 lg:gap-4"
       >
         <StatCard
           icon={<Trash2 size={18} strokeWidth={1.75} />}
@@ -261,9 +265,17 @@ export default function DashboardContent({
         custom={3} initial="hidden" animate="visible" variants={cardVariants}
         className="neu-card flex items-center gap-4"
       >
-        <div className="neu-inset flex items-center justify-center flex-shrink-0"
-          style={{ width: 44, height: 44, borderRadius: 12 }}>
-          <Mail size={20} color="#45aaf2" strokeWidth={1.75} />
+        <div
+          className="flex items-center justify-center flex-shrink-0"
+          style={{
+            width: 56,
+            height: 56,
+            borderRadius: 16,
+            background: '#1a1a1e',
+            boxShadow: 'inset 3px 3px 6px #111116, inset -3px -3px 6px #2c2c35',
+          }}
+        >
+          <Mail size={22} color="#45aaf2" strokeWidth={1.75} />
         </div>
         <div className="flex flex-col gap-0.5 min-w-0">
           <span className="text-xs font-medium" style={{ color: '#8888a0' }}>
@@ -347,6 +359,8 @@ export default function DashboardContent({
           </>
         )}
       </motion.div>
+      </div>
+      </div>
     </div>
   )
 }

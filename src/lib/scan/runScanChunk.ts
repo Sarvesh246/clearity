@@ -192,14 +192,29 @@ export async function runScanChunk(
         updated_at: runStartedAt,
       })
     } else if (canResume) {
-      await saveScanProgress(admin, userId, {
-        status: 'scanning',
-        action_type: null,
-        phase: listComplete ? 'Resuming scan...' : 'Resuming email list...',
-        started_at: runStartedAt,
-        cancelled_at: null,
-        completed_at: null,
-      })
+      // Conditional update: don't overwrite 'cancelled'. A cancel request may
+      // have landed between our lock acquisition and this write — if so, the
+      // WHERE clause matches zero rows and we skip rather than silently
+      // reopening a scan the user just stopped.
+      const { data: resumed } = await admin
+        .from('scan_jobs')
+        .update({
+          status: 'scanning',
+          action_type: null,
+          phase: listComplete ? 'Resuming scan...' : 'Resuming email list...',
+          started_at: runStartedAt,
+          cancelled_at: null,
+          completed_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', userId)
+        .neq('status', 'cancelled')
+        .select('user_id')
+        .maybeSingle()
+
+      if (!resumed) {
+        return { skipped: true }
+      }
     } else {
       await clearMessageIds(admin, userId)
       await admin.from('user_senders').delete().eq('user_id', userId)

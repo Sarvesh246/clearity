@@ -43,7 +43,7 @@ export default async function DashboardPage() {
 
   return (
     <main className="app-page">
-      <div className="app-container">
+      <div className="app-container app-container--wide">
         <ErrorBoundary>
           <DashboardContent
             firstName={firstName}
