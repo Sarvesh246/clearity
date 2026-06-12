@@ -180,8 +180,14 @@ async function fetchBatch(
 
       if (retry.length === 0) {
         if (!rateLimitedThisWave) throttle.onCleanWave()
+        // Pace to the throttle's target rate. This must apply on EVERY wave —
+        // the old `i + PARALLEL < ids.length` guard skipped the sleep whenever
+        // fetchBatch was called with a single wave (which is how scanMessageIds
+        // always calls it), so the chunked scan ran completely unthrottled
+        // (~100 msg/s ≈ 500 units/s, double Gmail's 250/s limit) and constantly
+        // provoked the 429 storms it was meant to avoid.
         const remaining = throttle.waveIntervalMs() - (Date.now() - waveStart)
-        if (remaining > 0 && i + PARALLEL < ids.length) await sleep(remaining)
+        if (remaining > 0) await sleep(remaining)
         pending = []
       } else {
         rateLimitedThisWave = true
