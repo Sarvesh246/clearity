@@ -38,10 +38,11 @@ export default function DashboardClient({ email }: Props) {
   }
 
   const isListing = isScanning && progress.list_complete === false
+  const displayScanned = Math.max(progress.cursor ?? 0, progress.scanned ?? 0)
   const pct = isListing
     ? 0
     : progress.total > 0
-      ? Math.min(99, Math.round((progress.scanned / progress.total) * 100))
+      ? Math.min(99, Math.round((displayScanned / progress.total) * 100))
       : 0
 
   return (
@@ -119,7 +120,7 @@ export default function DashboardClient({ email }: Props) {
               <p className="text-xs" style={{ color: '#555568' }}>
                 {isListing
                   ? `${progress.total.toLocaleString()} emails found so far`
-                  : `${pct}% — ${progress.scanned.toLocaleString()} / ${progress.total.toLocaleString()} emails`}
+                  : `${pct}% — ${displayScanned.toLocaleString()} / ${progress.total.toLocaleString()} emails`}
               </p>
             )}
           </div>
@@ -132,7 +133,7 @@ export default function DashboardClient({ email }: Props) {
               <span className="text-sm font-medium">Scan failed. Tap retry to continue where it left off.</span>
             </div>
             <button
-              onClick={() => handleStartScan()}
+              onClick={() => handleStartScan(true)}
               className="neu-button w-full flex items-center justify-center gap-2 px-6 py-4 text-white font-medium text-base"
             >
               <ScanLine size={18} strokeWidth={1.75} />

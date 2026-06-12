@@ -13,34 +13,38 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const body = await request.json().catch(() => ({}))
-  const result = await runScanChunk(user.id, {
-    forceFull: body.full === true,
-    resume: body.resume === true,
-  })
+  try {
+    const body = await request.json().catch(() => ({}))
+    const result = await runScanChunk(user.id, {
+      forceFull: body.full === true,
+      resume: body.resume === true,
+    })
 
-  if (result.skipped) {
-    return NextResponse.json({ ok: true, skipped: true })
+    if (result.skipped) {
+      return NextResponse.json({ ok: true, skipped: true })
+    }
+
+    if (result.error === 'gmail_auth_expired') {
+      return NextResponse.json(
+        { error: 'gmail_auth_expired', message: 'Your Gmail access expired — sign in again to continue' },
+        { status: 401 }
+      )
+    }
+
+    if (result.error && result.continued !== false) {
+      scheduleScanContinuation(user.id, { delayMs: 30_000 })
+    } else if (result.continued) {
+      scheduleScanContinuation(user.id)
+    }
+
+    if (result.error) {
+      return NextResponse.json(result, { status: 500 })
+    }
+
+    return NextResponse.json(result)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Scan failed'
+    console.error('[scan] unhandled error:', message)
+    return NextResponse.json({ error: message, continued: false }, { status: 500 })
   }
-
-  if (result.error === 'gmail_auth_expired') {
-    return NextResponse.json(
-      { error: 'gmail_auth_expired', message: 'Your Gmail access expired — sign in again to continue' },
-      { status: 401 }
-    )
-  }
-
-  if (result.error && result.continued !== false) {
-    // Failed chunk: retry in the background with a delay so persistent
-    // failures back off instead of looping continuation → failure → continuation.
-    scheduleScanContinuation(user.id, { delayMs: 30_000 })
-  } else if (result.continued) {
-    scheduleScanContinuation(user.id)
-  }
-
-  if (result.error) {
-    return NextResponse.json(result, { status: 500 })
-  }
-
-  return NextResponse.json(result)
 }

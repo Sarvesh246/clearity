@@ -51,6 +51,15 @@ export async function GET(req: Request) {
     // Auth expiry is not recoverable without the user signing in again.
     if (job.phase === 'Gmail access expired') continue
 
+    // Fatal config/schema errors must not be retried forever by cron.
+    if (
+      job.status === 'error' &&
+      job.phase &&
+      !job.phase.includes('will resume automatically')
+    ) {
+      continue
+    }
+
     const incomplete = hasIncompleteScan(job)
 
     if (!incomplete) continue

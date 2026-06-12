@@ -1,4 +1,4 @@
-const CACHE = 'clearity-v2'
+const CACHE = 'clearity-v3'
 
 const PRECACHE = [
   '/offline',

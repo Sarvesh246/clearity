@@ -214,9 +214,21 @@ export default function DashboardContent({
             </p>
           </div>
           {scanError && (
-            <div className="flex items-center gap-2" style={{ color: '#e84141' }}>
-              <AlertCircle size={16} strokeWidth={1.75} />
-              <span className="text-sm font-medium">Scan failed. Please try again.</span>
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2" style={{ color: '#e84141' }}>
+                <AlertCircle size={16} strokeWidth={1.75} />
+                <span className="text-sm font-medium">
+                  {progress.phase || 'Scan failed. Please try again.'}
+                </span>
+              </div>
+              <button
+                onClick={() => startRescan(canContinue ? { resume: true } : { full: true })}
+                className="neu-button w-full flex items-center justify-center gap-2 min-h-[44px] px-6 py-3 font-medium text-sm"
+                style={{ color: '#45aaf2' }}
+              >
+                <RefreshCw size={16} strokeWidth={1.75} />
+                {canContinue ? 'Retry Scan' : 'Try Again'}
+              </button>
             </div>
           )}
         </motion.div>

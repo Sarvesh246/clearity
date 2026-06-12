@@ -117,5 +117,20 @@ assert(
   hasIncompleteScan({ status: 'cancelled', list_complete: false, list_page_token: 'tok', cursor: 0, total: 0 })
 )
 
+function isRecoverableScanError(message) {
+  const lower = message.toLowerCase()
+  const fatal = ['could not find', 'column', 'schema cache', 'permission denied']
+  return !fatal.some(p => lower.includes(p))
+}
+
+assert(
+  'schema/column errors are not recoverable',
+  !isRecoverableScanError("Could not find the 'cancelled_at' column of 'scan_jobs' in the schema cache")
+)
+assert(
+  'transient Gmail errors are recoverable',
+  isRecoverableScanError('Gmail rate limit exceeded')
+)
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed > 0 ? 1 : 0)

@@ -224,7 +224,7 @@ export default function ProgressModal({
 
     async function poll() {
       try {
-        const res = await fetch('/api/scan/progress')
+        const res = await fetch('/api/scan/progress', { cache: 'no-store' })
         if (!res.ok) return
         const data: ScanProgress = await res.json()
 

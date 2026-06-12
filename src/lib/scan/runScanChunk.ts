@@ -14,6 +14,7 @@ import {
   loadMessageIdsForRange,
 } from '@/lib/scan/messageIds'
 import { finalizePartialScan } from '@/lib/scan/classifyPartial'
+import { isRecoverableScanError, scanErrorPhase } from '@/lib/scan/scanErrors'
 import { loadSendersIntoMap, upsertSendersList } from '@/lib/scan/persistence'
 import { tryAcquireChunkLock, releaseChunkLock } from '@/lib/scan/chunkLock'
 import {
@@ -575,19 +576,18 @@ export async function runScanChunk(
     }
 
     const message = err instanceof Error ? err.message : 'Scan failed'
+    const recoverable = isRecoverableScanError(message)
     const partial = await finalizePartialScan(admin, userId)
     await saveScanProgress(admin, userId, {
       status: 'error',
-      phase: partial.senderCount > 0
-        ? `${message} — ${partial.senderCount.toLocaleString()} senders saved, will resume automatically`
-        : `${message} — will resume automatically`,
+      phase: scanErrorPhase(message, partial),
       scanned: persistedCursor,
       cursor: persistedCursor,
       chunk_locked_at: null,
     })
     return {
       error: message,
-      continued: true,
+      continued: recoverable,
       scanned: persistedCursor,
       ...partial,
     }
