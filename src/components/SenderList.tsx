@@ -1,6 +1,6 @@
 'use client'
 
-import { useReducer, useMemo, useEffect } from 'react'
+import { useReducer, useMemo, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AnimatePresence } from 'framer-motion'
 import Link from 'next/link'
@@ -37,7 +37,9 @@ type SenderAction =
   | { type: 'SET_FILTER'; filter: FilterValue }
   | { type: 'REMOVE_SENDERS'; emails: Set<string> }
   | { type: 'ZERO_UNREAD'; emails: Set<string> }
+  | { type: 'ZERO_COUNTS'; emails: Set<string> }
   | { type: 'MARK_UNSUBSCRIBED'; emails: Set<string> }
+  | { type: 'MARK_UNSUBSCRIBED_KEEP_COUNTS'; emails: Set<string> }
   | { type: 'SET_ACTIVE_ACTION'; action: ActiveAction | null }
   | { type: 'INIT_SENDERS'; senders: UserSender[] }
   | { type: 'TOGGLE_HIDE_ZERO' }
@@ -68,6 +70,20 @@ function senderReducer(state: SenderState, action: SenderAction): SenderState {
         ...state,
         localSenders: state.localSenders.map(s =>
           action.emails.has(s.sender_email) ? { ...s, unread_count: 0 } : s
+        ),
+      }
+    case 'ZERO_COUNTS':
+      return {
+        ...state,
+        localSenders: state.localSenders.map(s =>
+          action.emails.has(s.sender_email) ? { ...s, email_count: 0, unread_count: 0 } : s
+        ),
+      }
+    case 'MARK_UNSUBSCRIBED_KEEP_COUNTS':
+      return {
+        ...state,
+        localSenders: state.localSenders.map(s =>
+          action.emails.has(s.sender_email) ? { ...s, is_unsubscribed: true } : s
         ),
       }
     case 'MARK_UNSUBSCRIBED':
@@ -115,10 +131,60 @@ export default function SenderList({ senders }: SenderListProps) {
 
   const { selectedSenders, activeFilter, localSenders, activeAction, hideZeroEmail } = state
 
+  // Action POST outcome, fed to the ProgressModal: the response is the
+  // authoritative completion/error signal (polling alone can race against
+  // stale scan_jobs rows). lastRequestRef lets the error view's Retry re-send.
+  const [serverResult, setServerResult] =
+    useState<{ processed: number; failed: number; unsubscribed?: number } | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const lastRequestRef = useRef<{ url: string; body: object } | null>(null)
+  // Remount the modal per action so its internal state starts fresh each time
+  const [actionEpoch, setActionEpoch] = useState(0)
+
   // Sync if parent re-fetches (e.g., navigation)
   useEffect(() => {
     dispatch({ type: 'INIT_SENDERS', senders })
   }, [senders])
+
+  async function postAction(url: string, body: object) {
+    lastRequestRef.current = { url, body }
+    setServerResult(null)
+    setActionError(null)
+    setActionEpoch(e => e + 1)
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => ({} as Record<string, unknown>))
+      if (res.status === 401) {
+        router.push('/?message=gmail_auth_expired')
+        return
+      }
+      if (!res.ok) {
+        setActionError(
+          (typeof data.message === 'string' && data.message) ||
+          (typeof data.error === 'string' && data.error) ||
+          'Something went wrong — please try again.'
+        )
+        return
+      }
+      setServerResult({
+        processed: typeof data.processed === 'number' ? data.processed : 0,
+        failed: typeof data.failed === 'number' ? data.failed : 0,
+        unsubscribed: typeof data.unsubscribed === 'number' ? data.unsubscribed : undefined,
+      })
+    } catch {
+      // Network drop — the action may still be running server-side; the
+      // modal's polling (or its watchdog) takes over from here.
+    }
+  }
+
+  function retryLastAction() {
+    const last = lastRequestRef.current
+    if (last) void postAction(last.url, last.body)
+  }
 
   const visibleSenders = useMemo(() => {
     let list = activeFilter === 'all' ? localSenders : localSenders.filter(s => s.classification === activeFilter)
@@ -166,18 +232,9 @@ export default function SenderList({ senders }: SenderListProps) {
     if (selected.length === 0) return
 
     dispatch({ type: 'SET_ACTIVE_ACTION', action: { type: actionType, senders: selected } })
-
-    fetch('/api/actions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: actionType,
-        senderEmails: selected.map(s => s.sender_email),
-      }),
-    }).catch((err: unknown) => {
-      if ((err as { status?: number })?.status === 401) {
-        router.push('/')
-      }
+    void postAction('/api/actions', {
+      action: actionType,
+      senderEmails: selected.map(s => s.sender_email),
     })
   }
 
@@ -186,15 +243,8 @@ export default function SenderList({ senders }: SenderListProps) {
     if (selected.length === 0) return
 
     dispatch({ type: 'SET_ACTIVE_ACTION', action: { type: 'unsub_delete', senders: selected } })
-
-    fetch('/api/unsubscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ senderEmails: selected.map(s => s.sender_email) }),
-    }).catch((err: unknown) => {
-      if ((err as { status?: number })?.status === 401) {
-        router.push('/')
-      }
+    void postAction('/api/unsubscribe', {
+      senderEmails: selected.map(s => s.sender_email),
     })
   }
 
@@ -205,15 +255,10 @@ export default function SenderList({ senders }: SenderListProps) {
     if (!eligible.length) return
 
     dispatch({ type: 'SET_ACTIVE_ACTION', action: { type: 'unsub_only', senders: eligible } })
-
-    fetch('/api/unsubscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        senderEmails: eligible.map(s => s.sender_email),
-        deleteAfter: false,
-      }),
-    }).catch(() => {})
+    void postAction('/api/unsubscribe', {
+      senderEmails: eligible.map(s => s.sender_email),
+      deleteAfter: false,
+    })
   }
 
   async function handleOverride(email: string, classification: Classification | null) {
@@ -225,7 +270,7 @@ export default function SenderList({ senders }: SenderListProps) {
     }).catch(() => {})
   }
 
-  function handleActionComplete({ processed: _processed, failed: _failed }: { processed: number; failed: number }) {
+  function handleActionComplete() {
     if (!activeAction) return
     const emails = new Set(activeAction.senders.map(s => s.sender_email))
 
@@ -238,17 +283,24 @@ export default function SenderList({ senders }: SenderListProps) {
         activeAction.senders.filter(s => s.has_unsubscribe_header).map(s => s.sender_email)
       )
       dispatch({ type: 'MARK_UNSUBSCRIBED', emails: unsubscribedEmails })
-      // Zero email counts for senders without unsubscribe headers
+      // Emails were deleted for every selected sender — zero their counts too
       const nonUnsubEmails = new Set(
         activeAction.senders.filter(s => !s.has_unsubscribe_header).map(s => s.sender_email)
       )
-      if (nonUnsubEmails.size > 0) dispatch({ type: 'ZERO_UNREAD', emails: nonUnsubEmails })
+      if (nonUnsubEmails.size > 0) dispatch({ type: 'ZERO_COUNTS', emails: nonUnsubEmails })
     } else if (activeAction.type === 'unsub_only') {
-      // Only mark as unsubscribed — don't remove or zero email counts
-      dispatch({ type: 'MARK_UNSUBSCRIBED', emails })
+      // Only mark as unsubscribed — no emails were deleted, keep counts
+      dispatch({ type: 'MARK_UNSUBSCRIBED_KEEP_COUNTS', emails })
     }
 
+    // Keep activeAction set: the modal stays open showing the summary screen.
+    // onClose (Clean up more / Escape) clears it.
     dispatch({ type: 'DESELECT_ALL' })
+  }
+
+  function handleModalClose() {
+    setServerResult(null)
+    setActionError(null)
     dispatch({ type: 'SET_ACTIVE_ACTION', action: null })
   }
 
@@ -410,11 +462,15 @@ export default function SenderList({ senders }: SenderListProps) {
 
       {/* Progress modal */}
       <ProgressModal
+        key={actionEpoch}
         isOpen={activeAction !== null}
         actionType={activeAction?.type ?? 'trash'}
         senders={activeAction?.senders ?? []}
         onComplete={handleActionComplete}
-        onClose={() => dispatch({ type: 'SET_ACTIVE_ACTION', action: null })}
+        onClose={handleModalClose}
+        serverResult={serverResult}
+        serverError={actionError}
+        onRetry={retryLastAction}
       />
 
       <InstallPrompt />

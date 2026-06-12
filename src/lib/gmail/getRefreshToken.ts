@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server'
+import { GmailNotConnectedError } from './getRefreshTokenForUser'
 
 export async function getRefreshToken(): Promise<string> {
   const supabase = await createClient()
@@ -13,7 +14,7 @@ export async function getRefreshToken(): Promise<string> {
     .single()
 
   if (error || !data?.google_refresh_token) {
-    throw new Error('Gmail not connected — please sign in again to reconnect')
+    throw new GmailNotConnectedError()
   }
 
   return data.google_refresh_token

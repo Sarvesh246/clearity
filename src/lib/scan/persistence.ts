@@ -57,6 +57,7 @@ export async function loadSendersIntoMap(
         'sender_email,sender_name,domain,email_count,unread_count,has_unsubscribe_header,unsubscribe_mailto,unsubscribe_url,unsubscribe_post,gmail_labels'
       )
       .eq('user_id', userId)
+      .order('sender_email', { ascending: true })
       .range(from, from + PAGE - 1)
 
     if (!data?.length) break

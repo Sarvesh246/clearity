@@ -1,6 +1,7 @@
 import { gmail_v1 } from 'googleapis'
 import type { SenderData } from './scanner'
 import { scanMessageIds } from './scanner'
+import { withGmailRetry } from './bulkActions'
 
 export interface IncrementalScanResult {
   senders: SenderData[]
@@ -26,13 +27,14 @@ export async function incrementalSync(
   let latestHistoryId = startHistoryId
 
   do {
-    const res = await gmail.users.history.list({
-      userId: 'me',
-      startHistoryId,
-      historyTypes: ['messageAdded'],
-      pageToken,
-      maxResults: 500,
-    })
+    const res = await withGmailRetry(() =>
+      gmail.users.history.list({
+        userId: 'me',
+        startHistoryId,
+        historyTypes: ['messageAdded'],
+        pageToken,
+        maxResults: 500,
+      }), 3)
 
     const history = res.data.history ?? []
     for (const record of history) {

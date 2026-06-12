@@ -1,6 +1,6 @@
 # Clearity — Inbox Recovery Tool
 
-## Status: Stage 10 Complete — Production Ready MVP
+## Status: Stage 12 Complete — Production hardened (full-debug pass June 2026)
 
 ## Stack
 - Next.js 16 App Router, TypeScript, Tailwind v4
@@ -167,6 +167,26 @@ Fill in `.env.local`:
 - Requires `SCAN_WORKER_SECRET` + `CRON_SECRET` env vars (app + Vercel) and the Stage 11 SQL migration applied; without the worker secret, scans stall when the tab closes.
 - Clicking "Scan" within ~3s of "Cancel" can no-op once (old chunk still releasing the lock) — click again; it self-heals.
 - Intra-slice crash re-scans up to one slice (~7k msgs); upserts are idempotent so no data corruption.
+
+## Stage 12 — Production hardening (full-debug pass)
+
+### Fixed
+- **Auth-expiry worker runaway**: a revoked/missing refresh token mid-scan made `/api/scan/continue` reschedule itself forever (infinite Vercel invocations). Missing token is now a typed `GmailNotConnectedError` (`src/lib/gmail/getRefreshTokenForUser.ts`) treated as auth expiry; continue route never reschedules `gmail_auth_expired`; plain chunk errors reschedule with a 30s delay (`scheduleScanContinuation(..., { delayMs })`) so persistent failures back off.
+- **Cron resumes errored scans**: `/api/cron/resume-scans` now matches status `scanning` OR `error` (skipping phase `Gmail access expired`) — previously an errored chain whose delayed retry died stranded the scan despite the UI promising auto-resume.
+- **Supabase 1000-row cap**: senders page, dashboard counts/health score, `finalizePartialScan`, classify-cache lookups and overrides all paginate now (`src/lib/supabase/fetchAllRows.ts`); `classify.ts` chunks `.in()` queries (URL-length + row cap). All pagination uses explicit ORDER BY (range without order is non-deterministic).
+- **Classification skip bug**: `classifyUnclassifiedSenders` advanced its offset while the `classification IS NULL` result set shrank — every other page of senders was skipped (left unclassified). Now always re-reads page 0 until empty.
+- **Scan ↔ bulk-action mutual exclusion** (`src/lib/scan/actionGuard.ts`): actions and scans share the `scan_jobs` row + Gmail rate budget. `/api/actions` and `/api/unsubscribe` now 409 (`scan_running`/`busy`) while a live scan runs, hold the chunk lock with a 60s heartbeat for their whole duration, and release in `finally`. `useScanRunner` treats rows with `action_type` set as "not a scan" (no phantom scan UI).
+- **`maxDuration = 300`** on `/api/actions` and `/api/unsubscribe` (they previously ran under the default and could be killed mid-delete).
+- **ProgressModal stale-complete race**: the modal polled the shared `scan_jobs` row and could see a previous run's `complete` instantly → false "Done" + optimistic sender removal before the action even started. Now: terminal statuses are only honored after the action was observed running; the action POST response is the authoritative completion/error signal (`serverResult`/`serverError` props); 20s watchdog catches never-started actions; Retry actually re-POSTs; modal remounts per action (key prop). Also fixed: summary screen was unreachable (modal unmounted on completion).
+- **Optimistic update mismatches**: `unsub_only` no longer zeroes email counts client-side (server keeps them); `unsub_delete` now zeroes counts for non-unsubscribable senders too (server deletes their emails).
+- **Listing-resume duplicate IDs**: resuming the listing phase from a persisted page token dedupes the first re-listed chunk against stored `scan_message_ids` (a crash between insert and token-save previously double-stored and double-scanned those messages).
+- **Gmail retry hardening** (`src/lib/gmail/gmailErrors.ts`): shared 429/403-rate/5xx/network-error classification; `withGmailRetry` on batchModify, per-sender `messages.list` (also quoted `from:"..."` queries), scan listing, and history.list; scanner treats dropped connections (ECONNRESET etc.) as transient.
+- **Gemini model**: `gemini-1.5-flash` is retired (every call 404'd → silent rule-based fallback); now `gemini-2.5-flash`, with quota detection also via message text (`RESOURCE_EXHAUSTED`).
+- Lint is fully clean (`npm run lint` → 0 problems): ActionBar countdown rewritten as a handler-driven interval (no setState-in-effect, no double-fire), ProgressModal ETA/stall state moved out of render, InstallPrompt defers its mount setState.
+
+### Stage 12 known limitations
+- A bulk action over very many emails (≫100k) can exceed the 300s budget; the killed run leaves `scan_jobs` stuck `scanning` until the next scan/action overwrites it (chunk lock self-heals via 6-min staleness; the modal must be dismissed manually).
+- Running a bulk action while a *partial/errored* scan is parked clobbers the scan's resume position (total/scanned reset) — senders/data are kept, but "Continue Scan" disappears; use Sync New Emails or a fresh scan after.
 
 ### Known limitations
 - Cancelling a scan now SAVES partial results (senders scanned so far are classified and kept); the empty-state cancel was fixed in Stage 11.

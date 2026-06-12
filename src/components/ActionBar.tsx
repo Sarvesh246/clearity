@@ -18,11 +18,10 @@ interface ActionBarProps {
 }
 
 interface ActionButton {
-  id: string
+  id: 'delete' | 'read' | 'archive' | 'unsub'
   label: string
   icon: React.ReactNode
   accentColor: string
-  onClick: () => void
   show: boolean
 }
 
@@ -40,9 +39,11 @@ export default function ActionBar({
   onUnsubscribeOnly,
 }: ActionBarProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null)
-  const [countdown, setCountdown] = useState<{ active: boolean; secondsLeft: number } | null>(null)
+  // Seconds remaining in the delete countdown, or null when not counting down
+  const [countdown, setCountdown] = useState<number | null>(null)
   const [showOverflow, setShowOverflow] = useState(false)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const remainingRef = useRef(0)
 
   // Close overflow when clicking outside
   useEffect(() => {
@@ -54,61 +55,44 @@ export default function ActionBar({
     return () => document.removeEventListener('mousedown', close)
   }, [showOverflow])
 
-  // Start countdown when activated
+  // Clear any running countdown on unmount (e.g. selection cleared)
   useEffect(() => {
-    if (!countdown?.active) return
-
-    if (countdown.secondsLeft <= 0) {
-      // Fire the action
-      setCountdown(null)
-      if (intervalRef.current) clearInterval(intervalRef.current)
-      onDeleteAll()
-      return
-    }
-
-    intervalRef.current = setInterval(() => {
-      setCountdown(prev => {
-        if (!prev) return null
-        const next = prev.secondsLeft - 1
-        if (next <= 0) {
-          if (intervalRef.current) clearInterval(intervalRef.current)
-          return { active: false, secondsLeft: 0 }
-        }
-        return { ...prev, secondsLeft: next }
-      })
-    }, 1000)
-
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [countdown?.active])
-
-  // Watch for secondsLeft hitting 0 after the interval ticks
-  useEffect(() => {
-    if (countdown && !countdown.active && countdown.secondsLeft === 0) {
-      setCountdown(null)
-      onDeleteAll()
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [countdown])
+  }, [])
 
   function startCountdown() {
-    setCountdown({ active: true, secondsLeft: COUNTDOWN_SECONDS })
+    if (intervalRef.current) clearInterval(intervalRef.current)
+    remainingRef.current = COUNTDOWN_SECONDS
+    setCountdown(COUNTDOWN_SECONDS)
+    intervalRef.current = setInterval(() => {
+      remainingRef.current -= 1
+      if (remainingRef.current <= 0) {
+        if (intervalRef.current) clearInterval(intervalRef.current)
+        intervalRef.current = null
+        setCountdown(null)
+        onDeleteAll()
+      } else {
+        setCountdown(remainingRef.current)
+      }
+    }, 1000)
   }
 
   function cancelCountdown() {
     if (intervalRef.current) clearInterval(intervalRef.current)
+    intervalRef.current = null
     setCountdown(null)
   }
 
+  // Handlers are attached at JSX time (not stored here) so the ref-using
+  // countdown starter is only ever invoked as an event handler.
   const buttons: ActionButton[] = [
     {
       id: 'delete',
       label: 'Delete All',
       icon: <Trash2 size={16} strokeWidth={1.75} />,
       accentColor: '#e84141',
-      onClick: startCountdown,
       show: true,
     },
     {
@@ -116,7 +100,6 @@ export default function ActionBar({
       label: 'Mark Read',
       icon: <Mail size={16} strokeWidth={1.75} />,
       accentColor: '#45aaf2',
-      onClick: onMarkRead,
       show: true,
     },
     {
@@ -124,7 +107,6 @@ export default function ActionBar({
       label: 'Archive',
       icon: <Archive size={16} strokeWidth={1.75} />,
       accentColor: '#ffb142',
-      onClick: onArchive,
       show: true,
     },
     {
@@ -132,13 +114,12 @@ export default function ActionBar({
       label: 'Unsub + Delete',
       icon: <BellOff size={16} strokeWidth={1.75} />,
       accentColor: '#e84141',
-      onClick: onUnsubscribeAndDelete,
       show: hasUnsubscribable,
     },
   ]
 
-  const barWidthPct = countdown
-    ? (countdown.secondsLeft / COUNTDOWN_SECONDS) * 100
+  const barWidthPct = countdown !== null
+    ? (countdown / COUNTDOWN_SECONDS) * 100
     : 100
 
   return (
@@ -170,7 +151,7 @@ export default function ActionBar({
           <span className="text-white font-semibold">{formatCount(totalEmailCount)}</span> emails
         </p>
 
-        {countdown ? (
+        {countdown !== null ? (
           /* Countdown mode */
           <>
             <p style={{ fontSize: 13, color: '#e8e8f0', textAlign: 'center' }}>
@@ -225,7 +206,12 @@ export default function ActionBar({
                 return (
                   <button
                     key={btn.id}
-                    onClick={btn.onClick}
+                    onClick={() => {
+                      if (btn.id === 'delete') startCountdown()
+                      else if (btn.id === 'read') onMarkRead()
+                      else if (btn.id === 'archive') onArchive()
+                      else onUnsubscribeAndDelete()
+                    }}
                     onMouseEnter={() => setHoveredId(btn.id)}
                     onMouseLeave={() => setHoveredId(null)}
                     className="neu-button"

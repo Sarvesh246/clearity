@@ -31,10 +31,13 @@ export async function GET(req: Request) {
   const staleBefore = new Date(Date.now() - 3 * 60 * 1000).toISOString()
   const lockStaleBefore = new Date(Date.now() - 6 * 60 * 1000).toISOString()
 
+  // 'error' rows are included because a chunk failure ends the waitUntil chain
+  // when its delayed retry also dies — without the cron, those scans would
+  // strand despite the UI promising "will resume automatically".
   const { data: jobs, error } = await admin
     .from('scan_jobs')
-    .select('user_id, status, scanned, total, list_complete, list_page_token, updated_at, chunk_locked_at')
-    .eq('status', 'scanning')
+    .select('user_id, status, phase, scanned, total, list_complete, list_page_token, updated_at, chunk_locked_at')
+    .in('status', ['scanning', 'error'])
     .is('action_type', null)
     .lt('updated_at', staleBefore)
 
@@ -44,6 +47,9 @@ export async function GET(req: Request) {
 
   let kicked = 0
   for (const job of jobs ?? []) {
+    // Auth expiry is not recoverable without the user signing in again.
+    if (job.phase === 'Gmail access expired') continue
+
     const incomplete =
       job.list_complete === false ||
       job.list_page_token != null ||

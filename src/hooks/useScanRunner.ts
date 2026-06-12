@@ -93,6 +93,18 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       const res = await fetch('/api/scan/progress')
       if (!res.ok) return
       const data: ScanProgress = await res.json()
+
+      // The job row currently belongs to a bulk action, not a scan (e.g. the
+      // scan request was skipped because an action holds the lock). Reset any
+      // optimistic scanning state instead of rendering action progress as a scan.
+      if (data.action_type) {
+        activeRef.current = false
+        setIsScanning(false)
+        setIsPaused(false)
+        stopPolling()
+        return
+      }
+
       setProgress(data)
 
       if (data.status === 'cancelled') {
@@ -183,6 +195,10 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       const res = await fetch('/api/scan/progress')
       if (!res.ok) return
       const data: ScanProgress = await res.json()
+
+      // A bulk action owns the job row — nothing scan-related to resume.
+      if (data.action_type) return
+
       setProgress(data)
 
       if (data.status === 'complete' || data.status === 'cancelled') {

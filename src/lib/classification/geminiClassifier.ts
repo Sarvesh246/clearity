@@ -35,7 +35,9 @@ Return ONLY valid JSON array. No explanation.`
 
 export async function classifyWithGemini(senders: SenderInput[]): Promise<ClassificationResult[]> {
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
+  // gemini-1.5-flash was retired; requests to it 404 and silently degraded
+  // every batch to rule-based classification.
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
 
   const results: ClassificationResult[] = []
 
@@ -59,7 +61,13 @@ export async function classifyWithGemini(senders: SenderInput[]): Promise<Classi
     } catch (err: unknown) {
       const status = (err as { status?: number; httpStatusCode?: number })?.status
         ?? (err as { httpStatusCode?: number })?.httpStatusCode
-      if (status === 429) throw new QuotaExceededError()
+      const message = err instanceof Error ? err.message : ''
+      // The SDK sometimes wraps quota failures in a plain Error whose message
+      // carries the status — detect those too so the caller can stop burning
+      // requests and fall back to rules for the rest of the run.
+      if (status === 429 || message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
+        throw new QuotaExceededError()
+      }
       // Non-quota error: fall back entire batch to rule-based
       for (const s of batch) {
         results.push(classifyByRules(s))

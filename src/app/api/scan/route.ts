@@ -30,10 +30,11 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  if (
-    result.error !== 'gmail_auth_expired' &&
-    (result.continued || (result.error && result.continued !== false))
-  ) {
+  if (result.error && result.continued !== false) {
+    // Failed chunk: retry in the background with a delay so persistent
+    // failures back off instead of looping continuation → failure → continuation.
+    scheduleScanContinuation(user.id, { delayMs: 30_000 })
+  } else if (result.continued) {
     scheduleScanContinuation(user.id)
   }
 

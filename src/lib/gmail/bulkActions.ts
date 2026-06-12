@@ -1,18 +1,21 @@
 import { gmail_v1 } from 'googleapis'
+import { isRateLimit, isTransient } from './gmailErrors'
 
 export type BulkActionProgress = (processed: number, total: number) => Promise<void>
 
-async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+export async function withGmailRetry<T>(fn: () => Promise<T>, maxAttempts = 5): Promise<T> {
   let lastError: unknown
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       return await fn()
     } catch (err: unknown) {
       lastError = err
-      const status = (err as { status?: number; code?: number })?.status
-        ?? (err as { status?: number; code?: number })?.code
-      if (status === 429) {
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)))
+      if (isRateLimit(err)) {
+        await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt)))
+        continue
+      }
+      if (isTransient(err) && attempt < maxAttempts - 1) {
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
         continue
       }
       throw err
@@ -34,7 +37,7 @@ async function batchModifyChunked(
   for (let i = 0; i < ids.length; i += chunkSize) {
     const chunk = ids.slice(i, i + chunkSize)
     try {
-      await withRetry(() =>
+      await withGmailRetry(() =>
         gmail.users.messages.batchModify({
           userId: 'me',
           requestBody: { ids: chunk, ...payload },

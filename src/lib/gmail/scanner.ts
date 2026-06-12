@@ -1,6 +1,7 @@
 import { gmail_v1 } from 'googleapis'
 import { parseFrom } from './parseFrom'
 import { parseUnsubscribe } from './parseUnsubscribe'
+import { isGone, isRateLimit, isTransient } from './gmailErrors'
 import { ScanCancelledError } from '@/types'
 
 export interface SenderData {
@@ -59,31 +60,6 @@ function sleep(ms: number) {
 
 function checkCancelled(signal?: AbortSignal) {
   if (signal?.aborted) throw new ScanCancelledError()
-}
-
-function getHttpStatus(err: unknown): number | undefined {
-  return (err as { response?: { status?: number } })?.response?.status
-    ?? (err as { status?: number; code?: number })?.status
-    ?? (err as { code?: number })?.code
-}
-
-function isRateLimit(err: unknown): boolean {
-  const status = getHttpStatus(err)
-  if (status === 429) return true
-  // Gmail sometimes signals user-rate limits as 403 with a specific reason.
-  const reason = (err as { errors?: Array<{ reason?: string }> })?.errors?.[0]?.reason
-  return status === 403 && (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded')
-}
-
-/** Messages deleted/moved between listing and fetching return 404/410 — skip them. */
-function isGone(err: unknown): boolean {
-  const status = getHttpStatus(err)
-  return status === 404 || status === 410
-}
-
-function isTransient(err: unknown): boolean {
-  const status = getHttpStatus(err)
-  return status === 500 || status === 502 || status === 503 || status === 504
 }
 
 /**

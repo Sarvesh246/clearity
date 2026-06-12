@@ -1,4 +1,5 @@
 import { gmail_v1 } from 'googleapis'
+import { withGmailRetry } from './bulkActions'
 
 export interface SenderMessageIds {
   email: string
@@ -30,14 +31,19 @@ async function getMessageIdsForSender(
 ): Promise<string[]> {
   const ids: string[] = []
   let pageToken: string | undefined
+  // Quote the address so characters Gmail search treats as operators
+  // (spaces, parens) can't change the query's meaning.
+  const query = `from:"${senderEmail.replace(/"/g, '')}"`
 
   do {
-    const res = await gmail.users.messages.list({
-      userId: 'me',
-      q: `from:${senderEmail}`,
-      maxResults: 500,
-      pageToken,
-    })
+    const res = await withGmailRetry(() =>
+      gmail.users.messages.list({
+        userId: 'me',
+        q: query,
+        maxResults: 500,
+        pageToken,
+      })
+    )
     const messages = res.data.messages ?? []
     for (const m of messages) {
       if (m.id) ids.push(m.id)

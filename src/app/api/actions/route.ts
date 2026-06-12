@@ -1,11 +1,21 @@
-import { NextResponse } from 'next/server'
+﻿import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { getRefreshToken } from '@/lib/gmail/getRefreshToken'
+import { GmailNotConnectedError } from '@/lib/gmail/getRefreshTokenForUser'
 import { getGmailClient } from '@/lib/gmail/client'
 import { getMessageIdsForSenders } from '@/lib/gmail/getMessageIds'
 import { trashMessages, markAsRead, archiveMessages } from '@/lib/gmail/bulkActions'
 import { isGoogleTokenExpiry } from '@/lib/gmail/handleTokenExpiry'
+import { acquireActionSlot, busyResponseBody } from '@/lib/scan/actionGuard'
+import { chunk } from '@/lib/utils'
+
+// Bulk actions over tens of thousands of emails far exceed the default
+// function duration â€” match the scan routes' budget.
+export const maxDuration = 300
+
+/** .in() values travel in the URL â€” keep each request comfortably small. */
+const IN_CHUNK = 200
 
 function adminClient() {
   return createAdminClient(
@@ -36,7 +46,14 @@ export async function POST(req: Request) {
 
   const admin = adminClient()
 
-  // In-memory status map — written to DB as a whole JSONB blob
+  // Scans and bulk actions share the progress row and Gmail rate budget â€”
+  // refuse to run while a scan is live instead of corrupting its state.
+  const slot = await acquireActionSlot(admin, user.id)
+  if (!slot.ok) {
+    return NextResponse.json(busyResponseBody(slot.reason), { status: 409 })
+  }
+
+  // In-memory status map â€” written to DB as a whole JSONB blob
   const statuses: Record<string, 'queued' | 'in_progress' | 'done'> = {}
   for (const email of senderEmails) statuses[email] = 'queued'
 
@@ -90,7 +107,7 @@ export async function POST(req: Request) {
         continue
       }
 
-      const onProgress = async (processed: number, _total: number) => {
+      const onProgress = async (processed: number) => {
         const globalProcessed = totalSucceeded + totalFailed + processed
         if (globalProcessed - lastDbUpdate >= 500 || processed >= ids.length) {
           lastDbUpdate = globalProcessed
@@ -117,17 +134,21 @@ export async function POST(req: Request) {
       }).eq('user_id', user.id)
     }
 
-    // Post-action: update user_senders counts
+    // Post-action: update user_senders counts (chunked â€” .in() is URL-bound)
     if (action === 'trash') {
-      await admin.from('user_senders')
-        .update({ email_count: 0, unread_count: 0 })
-        .eq('user_id', user.id)
-        .in('sender_email', senderEmails)
+      for (const emails of chunk(senderEmails, IN_CHUNK)) {
+        await admin.from('user_senders')
+          .update({ email_count: 0, unread_count: 0 })
+          .eq('user_id', user.id)
+          .in('sender_email', emails)
+      }
     } else if (action === 'mark_read') {
-      await admin.from('user_senders')
-        .update({ unread_count: 0 })
-        .eq('user_id', user.id)
-        .in('sender_email', senderEmails)
+      for (const emails of chunk(senderEmails, IN_CHUNK)) {
+        await admin.from('user_senders')
+          .update({ unread_count: 0 })
+          .eq('user_id', user.id)
+          .in('sender_email', emails)
+      }
     }
 
     await admin.from('scan_jobs').update({
@@ -139,16 +160,18 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ success: true, processed: totalSucceeded, failed: totalFailed })
   } catch (err) {
-    if (isGoogleTokenExpiry(err)) {
+    if (err instanceof GmailNotConnectedError || isGoogleTokenExpiry(err)) {
       await admin.from('profiles').update({ google_refresh_token: null }).eq('id', user.id)
       await admin.from('scan_jobs').update({ status: 'error', phase: 'Gmail access expired' }).eq('user_id', user.id)
       return NextResponse.json(
-        { error: 'gmail_auth_expired', message: 'Your Gmail access expired — sign in again to continue' },
+        { error: 'gmail_auth_expired', message: 'Your Gmail access expired â€” sign in again to continue' },
         { status: 401 }
       )
     }
     const message = err instanceof Error ? err.message : 'Action failed'
     await admin.from('scan_jobs').update({ status: 'error', phase: message }).eq('user_id', user.id)
     return NextResponse.json({ error: message }, { status: 500 })
+  } finally {
+    await slot.release()
   }
 }

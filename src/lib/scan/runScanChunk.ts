@@ -5,10 +5,11 @@ import { CHUNK_TIME_BUDGET_MS, scanMessageIds } from '@/lib/gmail/scanner'
 import { incrementalSync } from '@/lib/gmail/incrementalScan'
 import { classify } from '@/lib/classification/classify'
 import { isGoogleTokenExpiry } from '@/lib/gmail/handleTokenExpiry'
-import { getRefreshTokenForUser } from '@/lib/gmail/getRefreshTokenForUser'
+import { getRefreshTokenForUser, GmailNotConnectedError } from '@/lib/gmail/getRefreshTokenForUser'
 import {
   clearMessageIds,
   countMessageIds,
+  filterToNewMessageIds,
   insertMessageIds,
   loadMessageIdsForRange,
 } from '@/lib/scan/messageIds'
@@ -193,6 +194,7 @@ export async function runScanChunk(
     } else if (canResume) {
       await saveScanProgress(admin, userId, {
         status: 'scanning',
+        action_type: null,
         phase: listComplete ? 'Resuming scan...' : 'Resuming email list...',
         started_at: runStartedAt,
         cancelled_at: null,
@@ -302,6 +304,11 @@ export async function runScanChunk(
     let listPageToken: string | null = jobState?.list_page_token ?? null
 
     if (!listingDone) {
+      // When resuming from a persisted page token, the previous invocation may
+      // have inserted IDs but died before saving its next token — the first
+      // re-listed chunk can overlap rows already stored. Dedupe just that one.
+      let dedupeFirstChunk = listPageToken !== null
+
       while (Date.now() < deadline) {
         const existingCount = await countMessageIds(admin, userId)
 
@@ -319,8 +326,14 @@ export async function runScanChunk(
           },
         })
 
-        if (chunk.ids.length > 0) {
-          await insertMessageIds(admin, userId, existingCount, chunk.ids)
+        let newIds = chunk.ids
+        if (dedupeFirstChunk && newIds.length > 0) {
+          newIds = await filterToNewMessageIds(admin, userId, newIds)
+        }
+        dedupeFirstChunk = false
+
+        if (newIds.length > 0) {
+          await insertMessageIds(admin, userId, existingCount, newIds)
         }
 
         messageTotal = await countMessageIds(admin, userId)
@@ -445,7 +458,9 @@ export async function runScanChunk(
       return { cancelled: true, scanned: globalCursor, ...partial }
     }
 
-    if (isGoogleTokenExpiry(err)) {
+    // Both cases need the user to sign in again — never auto-retry these, or a
+    // background continuation chain would loop forever against a dead token.
+    if (err instanceof GmailNotConnectedError || isGoogleTokenExpiry(err)) {
       await admin.from('profiles').update({ google_refresh_token: null }).eq('id', userId)
       await saveScanProgress(admin, userId, {
         status: 'error',
@@ -453,7 +468,7 @@ export async function runScanChunk(
         cursor: globalCursor,
         chunk_locked_at: null,
       })
-      return { error: 'gmail_auth_expired' }
+      return { error: 'gmail_auth_expired', continued: false }
     }
 
     const message = err instanceof Error ? err.message : 'Scan failed'

@@ -27,12 +27,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, skipped: true })
   }
 
-  if (result.continued || (result.error && result.continued !== false)) {
-    scheduleScanContinuation(userId)
-  }
-
+  // Never reschedule on auth expiry — the token is gone and every retry would
+  // fail identically, looping the worker chain forever. Plain errors reschedule
+  // with a delay so persistent failures back off instead of spinning.
   if (result.error === 'gmail_auth_expired') {
     return NextResponse.json({ error: 'gmail_auth_expired' }, { status: 401 })
+  }
+
+  if (result.error && result.continued !== false) {
+    scheduleScanContinuation(userId, { delayMs: 30_000 })
+  } else if (result.continued) {
+    scheduleScanContinuation(userId)
   }
 
   if (result.error) {

@@ -36,6 +36,37 @@ export async function insertMessageIds(
   }
 }
 
+/**
+ * Drop IDs that are already stored for this user. Needed when resuming the
+ * listing phase from a persisted page token: a previous invocation may have
+ * crashed after inserting IDs but before saving its next page token, so the
+ * re-listed pages overlap rows already inserted. Without this filter those
+ * messages would be stored (and later scanned/counted) twice.
+ */
+export async function filterToNewMessageIds(
+  admin: SupabaseClient,
+  userId: string,
+  ids: string[]
+): Promise<string[]> {
+  if (ids.length === 0) return ids
+
+  const existing = new Set<string>()
+  const CHECK_BATCH = 500
+  for (let i = 0; i < ids.length; i += CHECK_BATCH) {
+    const slice = ids.slice(i, i + CHECK_BATCH)
+    const { data, error } = await admin
+      .from('scan_message_ids')
+      .select('message_id')
+      .eq('user_id', userId)
+      .in('message_id', slice)
+    if (error) throw error
+    for (const row of data ?? []) existing.add(row.message_id)
+  }
+
+  if (existing.size === 0) return ids
+  return ids.filter(id => !existing.has(id))
+}
+
 export async function loadMessageIdSlice(
   admin: SupabaseClient,
   userId: string,

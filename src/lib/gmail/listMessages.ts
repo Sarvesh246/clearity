@@ -1,4 +1,5 @@
 import { gmail_v1 } from 'googleapis'
+import { withGmailRetry } from './bulkActions'
 import { ScanCancelledError } from '@/types'
 
 function checkCancelled(signal?: AbortSignal) {
@@ -32,12 +33,13 @@ export async function listMessageIdsChunk(
     checkCancelled(signal)
     if (Date.now() >= deadline) break
 
-    const listRes = await gmail.users.messages.list({
-      userId: 'me',
-      maxResults: 500,
-      pageToken,
-      fields: 'messages/id,nextPageToken',
-    })
+    const listRes = await withGmailRetry(() =>
+      gmail.users.messages.list({
+        userId: 'me',
+        maxResults: 500,
+        pageToken,
+        fields: 'messages/id,nextPageToken',
+      }), 3)
 
     const page = listRes.data
     if (page.messages) {

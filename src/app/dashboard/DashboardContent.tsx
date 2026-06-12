@@ -319,7 +319,7 @@ export default function DashboardContent({
               className="neu-button w-full flex items-center justify-center gap-2 min-h-[44px] px-6 py-3 font-medium text-xs"
               style={{ color: '#555568' }}
             >
-              Full rescan (slow — 145k+ emails)
+              Full rescan (slow — re-reads every email)
             </button>
           </>
         ) : (

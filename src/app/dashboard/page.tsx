@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation'
 import { calculateHealthScore } from '@/lib/scoring'
 import DashboardContent from './DashboardContent'
 import ErrorBoundary from '@/components/ErrorBoundary'
+import { fetchAllRows } from '@/lib/supabase/fetchAllRows'
 import type { UserSender } from '@/types'
 
 export default async function DashboardPage() {
@@ -10,13 +11,20 @@ export default async function DashboardPage() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/')
 
-  const [{ data: profile }, { data: senders }, { data: scanJob }] = await Promise.all([
+  const [{ data: profile }, allSenders, { data: scanJob }] = await Promise.all([
     supabase.from('profiles').select('last_scan_at').eq('id', user.id).single(),
-    supabase.from('user_senders').select('*').eq('user_id', user.id),
+    // Paginated — a single select caps at 1000 rows, which would skew the
+    // health score and junk/safe counts for large inboxes.
+    fetchAllRows<UserSender>((from, to) =>
+      supabase
+        .from('user_senders')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('id', { ascending: true })
+        .range(from, to)
+    ).catch(() => [] as UserSender[]),
     supabase.from('scan_jobs').select('status, scanned, total').eq('user_id', user.id).maybeSingle(),
   ])
-
-  const allSenders: UserSender[] = senders ?? []
   const health = calculateHealthScore(allSenders)
   const isPartialScan =
     allSenders.length > 0 &&

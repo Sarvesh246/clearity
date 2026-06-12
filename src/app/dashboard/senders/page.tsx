@@ -5,6 +5,8 @@ import { ArrowLeft, Settings } from 'lucide-react'
 import type { Classification } from '@/types'
 import SenderList from '@/components/SenderList'
 import ErrorBoundary from '@/components/ErrorBoundary'
+import { fetchAllRows } from '@/lib/supabase/fetchAllRows'
+import type { UserSender } from '@/types'
 
 export default async function SendersPage() {
   const supabase = await createClient()
@@ -12,25 +14,38 @@ export default async function SendersPage() {
 
   if (!user) redirect('/')
 
-  const [sendersResult, overridesResult] = await Promise.all([
-    supabase
-      .from('user_senders')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('email_count', { ascending: false }),
-    supabase
-      .from('user_sender_overrides')
-      .select('sender_email, override')
-      .eq('user_id', user.id),
-  ])
-
-  if (sendersResult.error) redirect('/dashboard')
+  let allSenders: UserSender[]
+  let allOverrides: { sender_email: string; override: string }[]
+  try {
+    // Paginated — a single select caps at 1000 rows and would silently
+    // truncate large inboxes.
+    ;[allSenders, allOverrides] = await Promise.all([
+      fetchAllRows<UserSender>((from, to) =>
+        supabase
+          .from('user_senders')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('email_count', { ascending: false })
+          .order('sender_email', { ascending: true })
+          .range(from, to)
+      ),
+      fetchAllRows((from, to) =>
+        supabase
+          .from('user_sender_overrides')
+          .select('sender_email, override')
+          .eq('user_id', user.id)
+          .range(from, to)
+      ),
+    ])
+  } catch {
+    redirect('/dashboard')
+  }
 
   const overrideMap = new Map(
-    (overridesResult.data ?? []).map(o => [o.sender_email, o.override as Classification])
+    allOverrides.map(o => [o.sender_email, o.override as Classification])
   )
 
-  const senders = (sendersResult.data ?? []).map(s => ({
+  const senders = allSenders.map(s => ({
     ...s,
     classification: (overrideMap.get(s.sender_email) ?? s.classification) as Classification | null,
   }))

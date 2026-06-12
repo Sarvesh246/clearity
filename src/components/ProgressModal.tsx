@@ -12,7 +12,17 @@ interface ProgressModalProps {
   senders: UserSender[]
   onComplete: (result: { processed: number; failed: number }) => void
   onClose: () => void
+  /** Authoritative result from the action POST — finalizes even if polling lags. */
+  serverResult?: { processed: number; failed: number; unsubscribed?: number } | null
+  /** Error from the action POST (e.g. 409 scan running) — shows the error view. */
+  serverError?: string | null
+  /** Re-issues the failed action POST from the error view. */
+  onRetry?: () => void
 }
+
+/** If the job row never shows our action running within this window, the POST
+ * likely never reached the server — surface an error instead of spinning. */
+const START_WATCHDOG_MS = 20_000
 
 const ACTION_LABELS: Record<string, string> = {
   trash: 'Deleting',
@@ -133,17 +143,30 @@ export default function ProgressModal({
   senders,
   onComplete,
   onClose,
+  serverResult = null,
+  serverError = null,
+  onRetry,
 }: ProgressModalProps) {
   const router = useRouter()
   const [progress, setProgress] = useState<ScanProgress | null>(null)
   const [view, setView] = useState<'progress' | 'summary' | 'error'>('progress')
   const [result, setResult] = useState<{ processed: number; failed: number; unsubscribed?: number } | null>(null)
   const [stallMsgIndex, setStallMsgIndex] = useState(0)
+  const [isStalled, setIsStalled] = useState(false)
+  const [etaText, setEtaText] = useState('')
+  const [watchdogTripped, setWatchdogTripped] = useState(false)
+  // Bumped on Retry so the polling effect tears down and starts fresh.
+  const [pollEpoch, setPollEpoch] = useState(0)
   const lastProcessedRef = useRef<number>(-1)
   const stallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const stallCycleRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const startedAtRef = useRef<number>(Date.now())
+  const startedAtRef = useRef<number>(0)
+  // The scan_jobs row is shared with scans and previous actions, so the first
+  // polls can return a stale 'complete'/'error' row from an earlier run. Only
+  // honor those statuses after this action has been observed running.
+  const sawRunningRef = useRef(false)
+  const finalizedRef = useRef(false)
 
   // Escape key dismisses the modal when in progress view
   useEffect(() => {
@@ -166,8 +189,10 @@ export default function ProgressModal({
     if (processed !== lastProcessedRef.current) {
       lastProcessedRef.current = processed
       clearStallTimers()
+      setIsStalled(false)
       setStallMsgIndex(0)
       stallTimerRef.current = setTimeout(() => {
+        setIsStalled(true)
         stallCycleRef.current = setInterval(() => {
           setStallMsgIndex(i => (i + 1) % STALL_MESSAGES.length)
         }, 3000)
@@ -175,37 +200,68 @@ export default function ProgressModal({
     }
   }
 
+  // Note: the parent remounts this component per action (key prop), so there is
+  // no state to reset on close — only timers need cleanup.
   useEffect(() => {
     if (!isOpen) {
-      setView('progress')
-      setProgress(null)
-      setResult(null)
-      setStallMsgIndex(0)
       clearStallTimers()
       if (pollRef.current) clearInterval(pollRef.current)
       return
     }
     startedAtRef.current = Date.now()
+    sawRunningRef.current = false
+    finalizedRef.current = false
+
+    function finalize(processed: number, unsubscribed?: number) {
+      if (finalizedRef.current) return
+      finalizedRef.current = true
+      if (pollRef.current) clearInterval(pollRef.current)
+      clearStallTimers()
+      setResult({ processed, failed: 0, unsubscribed })
+      setView('summary')
+      onComplete({ processed, failed: 0 })
+    }
 
     async function poll() {
       try {
         const res = await fetch('/api/scan/progress')
         if (!res.ok) return
         const data: ScanProgress = await res.json()
+
+        // The row currently belongs to a scan, not a bulk action — ignore it.
+        if (!data.action_type) return
+
         setProgress(data)
         resetStallDetection(data.processed ?? 0)
 
+        // ETA for bulk-delete phases (computed here — render must stay pure)
+        const processedNow = data.processed ?? 0
+        const totalNow = data.total ?? 0
+        if (processedNow > 100 && totalNow > 0) {
+          const elapsed = Date.now() - startedAtRef.current
+          const rate = processedNow / Math.max(elapsed, 1)
+          const etaMs = rate > 0 ? (totalNow - processedNow) / rate : 0
+          const etaMins = Math.ceil(etaMs / 60_000)
+          setEtaText(etaMins <= 1 ? ' · <1 min left' : ` · ~${etaMins} min left`)
+        } else {
+          setEtaText('')
+        }
+
+        if (data.status === 'scanning') {
+          sawRunningRef.current = true
+          return
+        }
+
+        // Stale terminal rows from a previous run must not finalize this one.
+        if (!sawRunningRef.current) return
+
         if (data.status === 'complete') {
-          if (pollRef.current) clearInterval(pollRef.current)
-          clearStallTimers()
-          const processed = data.processed ?? 0
           const unsubscribed = data.unsubscribe_statuses
             ? Object.values(data.unsubscribe_statuses).filter(s => s.success).length
             : undefined
-          setResult({ processed, failed: 0, unsubscribed })
-          setView('summary')
-          onComplete({ processed, failed: 0 })
+          finalize(data.processed ?? 0, unsubscribed)
         } else if (data.status === 'error') {
+          if (finalizedRef.current) return
           if (pollRef.current) clearInterval(pollRef.current)
           clearStallTimers()
           setView('error')
@@ -218,21 +274,53 @@ export default function ProgressModal({
     poll()
     pollRef.current = setInterval(poll, 1500)
 
+    const watchdog = setTimeout(() => {
+      if (!sawRunningRef.current && !finalizedRef.current) setWatchdogTripped(true)
+    }, START_WATCHDOG_MS)
+
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
+      clearTimeout(watchdog)
       clearStallTimers()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen])
+  }, [isOpen, pollEpoch])
+
+  // Authoritative completion from the action POST itself — covers actions that
+  // finish between polls and the very-fast path where polling never observes
+  // the 'scanning' state.
+  useEffect(() => {
+    if (!isOpen || !serverResult) return
+    // Deferred so the effect doesn't set state synchronously
+    const timer = setTimeout(() => {
+      if (finalizedRef.current) return
+      finalizedRef.current = true
+      if (pollRef.current) clearInterval(pollRef.current)
+      clearStallTimers()
+      setResult(serverResult)
+      setView('summary')
+      onComplete({ processed: serverResult.processed, failed: serverResult.failed })
+    }, 0)
+    return () => clearTimeout(timer)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, serverResult])
 
   if (!isOpen) return null
+
+  const showError =
+    view === 'error' || (view === 'progress' && (!!serverError || watchdogTripped))
+  const showProgress = view === 'progress' && !showError
+  const errorMessage =
+    serverError ??
+    (view === 'error'
+      ? progress?.phase ?? 'An error occurred.'
+      : "Couldn't start — check your connection and try again.")
 
   const processed = progress?.processed ?? 0
   const total = progress?.total ?? 0
   const pct = total > 0 ? Math.round((processed / total) * 100) : 0
   const senderStatuses = progress?.sender_statuses ?? {}
   const unsubStatuses = progress?.unsubscribe_statuses ?? {}
-  const isStalled = stallTimerRef.current === null && stallCycleRef.current !== null
 
   const isUnsubPhase =
     (actionType === 'unsub_delete' || actionType === 'unsub_only') &&
@@ -253,16 +341,6 @@ export default function ProgressModal({
   const useCompactList = senders.length <= COMPACT_LIST_THRESHOLD
 
   const unsubSuccessCount = Object.values(unsubStatuses).filter(s => s.success).length
-
-  // ETA calculation for bulk-delete phases
-  const etaText = (() => {
-    if (!progress || processed <= 100 || total <= 0) return ''
-    const elapsed = Date.now() - startedAtRef.current
-    const rate = processed / Math.max(elapsed, 1)
-    const etaMs = rate > 0 ? (total - processed) / rate : 0
-    const etaMins = Math.ceil(etaMs / 60_000)
-    return etaMins <= 1 ? ' · <1 min left' : ` · ~${etaMins} min left`
-  })()
 
   const phaseHint = progress?.phase &&
     progress.phase !== 'Unsubscribing...' &&
@@ -300,7 +378,7 @@ export default function ProgressModal({
           overflowY: 'auto',
         }}
       >
-        {view === 'progress' && (
+        {showProgress && (
           <>
             {/* Header */}
             <p
@@ -530,10 +608,10 @@ export default function ProgressModal({
           </div>
         )}
 
-        {view === 'error' && (
+        {showError && (
           <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
             <p className="text-white font-semibold" style={{ fontSize: 17 }}>Something went wrong</p>
-            <p style={{ fontSize: 14, color: '#8888a0' }}>{progress?.phase ?? 'An error occurred.'}</p>
+            <p style={{ fontSize: 14, color: '#8888a0' }}>{errorMessage}</p>
             <div style={{ display: 'flex', gap: 10 }}>
               <button
                 onClick={onClose}
@@ -546,6 +624,9 @@ export default function ProgressModal({
                 onClick={() => {
                   setView('progress')
                   setProgress(null)
+                  setWatchdogTripped(false)
+                  setPollEpoch(e => e + 1)
+                  onRetry?.()
                 }}
                 className="neu-button"
                 style={{ padding: '10px 20px', fontSize: 14, fontWeight: 500, color: accentColor }}

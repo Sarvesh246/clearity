@@ -22,21 +22,27 @@ export async function classify(
   const uniqueDomains = Array.from(domainMap.values())
   const allDomains = uniqueDomains.map(s => s.domain)
 
-  // Bulk-fetch cached domain classifications
-  const { data: cached } = await adminClient
-    .from('sender_classifications')
-    .select('domain,classification,confidence,method,reason')
-    .in('domain', allDomains)
-
-  const cachedMap = new Map<string, ClassificationResult>(
-    (cached ?? []).map(row => [row.domain, {
-      domain: row.domain,
-      classification: row.classification,
-      confidence: row.confidence ?? 0.8,
-      method: row.method as 'ai' | 'rule_based',
-      reason: row.reason ?? '',
-    }])
-  )
+  // Bulk-fetch cached domain classifications. Chunked: .in() puts every value
+  // in the request URL (length-limited) and a single select caps at 1000 rows —
+  // either silently drops cache hits for large inboxes and re-burns AI quota.
+  const cachedMap = new Map<string, ClassificationResult>()
+  const IN_CHUNK = 200
+  for (let i = 0; i < allDomains.length; i += IN_CHUNK) {
+    const { data: cached, error } = await adminClient
+      .from('sender_classifications')
+      .select('domain,classification,confidence,method,reason')
+      .in('domain', allDomains.slice(i, i + IN_CHUNK))
+    if (error) throw new Error(error.message)
+    for (const row of cached ?? []) {
+      cachedMap.set(row.domain, {
+        domain: row.domain,
+        classification: row.classification,
+        confidence: row.confidence ?? 0.8,
+        method: row.method as 'ai' | 'rule_based',
+        reason: row.reason ?? '',
+      })
+    }
+  }
 
   const uncached = uniqueDomains.filter(s => !cachedMap.has(s.domain))
 
@@ -81,15 +87,20 @@ export async function classify(
     ...newResults.map(r => [r.domain, r] as [string, ClassificationResult]),
   ])
 
-  // Fetch user overrides
-  const { data: overrides } = await adminClient
-    .from('user_sender_overrides')
-    .select('sender_email,override')
-    .eq('user_id', userId)
-
-  const overrideMap = new Map<string, 'safe' | 'junk'>(
-    (overrides ?? []).map(o => [o.sender_email, o.override])
-  )
+  // Fetch user overrides (paginated past the 1000-row cap)
+  const overrideMap = new Map<string, 'safe' | 'junk'>()
+  const PAGE = 1000
+  for (let from = 0; ; from += PAGE) {
+    const { data: overrides } = await adminClient
+      .from('user_sender_overrides')
+      .select('sender_email,override')
+      .eq('user_id', userId)
+      .order('sender_email', { ascending: true })
+      .range(from, from + PAGE - 1)
+    if (!overrides?.length) break
+    for (const o of overrides) overrideMap.set(o.sender_email, o.override)
+    if (overrides.length < PAGE) break
+  }
 
   // Build per-sender update rows
   const updates = senders.map(s => {

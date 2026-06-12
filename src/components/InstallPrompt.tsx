@@ -46,8 +46,12 @@ export default function InstallPrompt() {
     }
 
     if (p === 'ios') {
-      setPlatform('ios')
-      setVisible(true)
+      // Deferred so the effect doesn't set state synchronously during mount
+      const timer = setTimeout(() => {
+        setPlatform('ios')
+        setVisible(true)
+      }, 0)
+      return () => clearTimeout(timer)
     }
   }, [])
 
