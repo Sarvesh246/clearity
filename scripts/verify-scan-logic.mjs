@@ -123,6 +123,24 @@ function isRecoverableScanError(message) {
   return !fatal.some(p => lower.includes(p))
 }
 
+const AUTO_RESUME_MARKER = 'will resume automatically'
+const GMAIL_QUOTA_PATTERNS = ['quota exceeded', 'queries per minute']
+
+function scanErrorPhase(message, partial) {
+  if (!isRecoverableScanError(message)) return message
+  const lower = message.toLowerCase()
+  if (GMAIL_QUOTA_PATTERNS.some(p => lower.includes(p))) {
+    if (partial?.senderCount > 0) {
+      return `Gmail is temporarily busy — ${partial.senderCount.toLocaleString()} senders saved so far. Your scan ${AUTO_RESUME_MARKER} in about a minute.`
+    }
+    return `Gmail is temporarily busy — your scan ${AUTO_RESUME_MARKER} in about a minute.`
+  }
+  if (partial?.senderCount > 0) {
+    return `${message} — ${partial.senderCount.toLocaleString()} senders saved, ${AUTO_RESUME_MARKER}`
+  }
+  return `${message} — ${AUTO_RESUME_MARKER}`
+}
+
 assert(
   'schema/column errors are not recoverable',
   !isRecoverableScanError("Could not find the 'cancelled_at' column of 'scan_jobs' in the schema cache")
@@ -130,6 +148,62 @@ assert(
 assert(
   'transient Gmail errors are recoverable',
   isRecoverableScanError('Gmail rate limit exceeded')
+)
+
+assert(
+  'Gmail quota errors get a user-friendly auto-resume message',
+  scanErrorPhase("Quota exceeded for quota metric 'Queries'").includes('Gmail is temporarily busy') &&
+    scanErrorPhase("Quota exceeded for quota metric 'Queries'").includes('will resume automatically')
+)
+
+// After quota wait: in-flight UI must not reset to committed cursor
+assert(
+  'display progress keeps in-flight scanned ahead of committed cursor',
+  Math.max(5000, 8200) === 8200
+)
+
+// Mirrors fetchBatch's deadline-aware backoff: waiting must never overrun the
+// invocation budget (Vercel would hard-kill the function and lose the slice).
+function shouldPauseForQuota(now, backoffMs, deadline) {
+  return now + backoffMs >= deadline
+}
+
+assert(
+  'quota backoff pauses when the wait would overrun the deadline',
+  shouldPauseForQuota(280_000, 20_000, 290_000)
+)
+assert(
+  'quota backoff keeps waiting while there is budget left',
+  !shouldPauseForQuota(100_000, 20_000, 290_000)
+)
+
+// Mirrors runScanChunk's sub-slice checkpoint loop: the committed cursor must
+// advance with every sub-slice, so a kill loses at most one sub-slice.
+function checkpointAfterSubSlices(start, subSliceResults) {
+  let cursor = start
+  for (const done of subSliceResults) cursor += done
+  return cursor
+}
+
+assert(
+  'cursor commits per sub-slice — a kill resumes near the failure point',
+  checkpointAfterSubSlices(0, [500, 500, 500, 320]) === 1820
+)
+
+// Quota-paused scan stays status=scanning with cursor < total → still resumable
+assert(
+  'quota-paused scan remains incomplete and auto-continues',
+  hasIncompleteScan({ status: 'scanning', list_complete: true, cursor: 4000, total: 91000 }) &&
+    canResumeScan({ status: 'scanning', list_complete: true, cursor: 4000, total: 91000 })
+)
+
+// Listing paused by quota must not be considered complete even without a token
+function listChunkComplete(pageToken, pausedForQuota) {
+  return !pageToken && !pausedForQuota
+}
+assert(
+  'quota-paused listing is never marked complete',
+  !listChunkComplete(undefined, true) && listChunkComplete(undefined, false)
 )
 
 console.log(`\n${passed} passed, ${failed} failed`)

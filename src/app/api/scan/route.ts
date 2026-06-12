@@ -34,7 +34,9 @@ export async function POST(request: NextRequest) {
     if (result.error && result.continued !== false) {
       scheduleScanContinuation(user.id, { delayMs: 30_000 })
     } else if (result.continued) {
-      scheduleScanContinuation(user.id)
+      // Quota pause: wait for Gmail's per-minute quota window to roll over
+      // before the next chunk, instead of immediately hitting the limit again.
+      scheduleScanContinuation(user.id, result.quotaPaused ? { delayMs: 45_000 } : {})
     }
 
     if (result.error) {

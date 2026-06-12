@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { scheduleScanContinuation } from '@/lib/scan/scheduleContinuation'
+import { AUTO_RESUME_MARKER } from '@/lib/scan/scanErrors'
 import { hasIncompleteScan } from '@/lib/scan/scanState'
 
 export const maxDuration = 60
@@ -55,7 +56,7 @@ export async function GET(req: Request) {
     if (
       job.status === 'error' &&
       job.phase &&
-      !job.phase.includes('will resume automatically')
+      !job.phase.includes(AUTO_RESUME_MARKER)
     ) {
       continue
     }

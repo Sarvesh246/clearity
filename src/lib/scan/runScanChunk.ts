@@ -1,7 +1,7 @@
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { getGmailClient } from '@/lib/gmail/client'
 import { listMessageIdsChunk } from '@/lib/gmail/listMessages'
-import { CHUNK_TIME_BUDGET_MS, scanMessageIds } from '@/lib/gmail/scanner'
+import { CHUNK_TIME_BUDGET_MS, scanMessageIds, type SenderData } from '@/lib/gmail/scanner'
 import { incrementalSync } from '@/lib/gmail/incrementalScan'
 import { classify } from '@/lib/classification/classify'
 import { isGoogleTokenExpiry } from '@/lib/gmail/handleTokenExpiry'
@@ -61,6 +61,8 @@ export interface RunScanChunkOptions {
 
 export interface RunScanChunkResult {
   continued?: boolean
+  /** Chunk stopped early because Gmail is rate-limiting — reschedule with a delay. */
+  quotaPaused?: boolean
   cancelled?: boolean
   incremental?: boolean
   phase?: string
@@ -153,6 +155,8 @@ export async function runScanChunk(
   let globalCursor = 0
   /** Latest checkpoint written to DB — survives mid-chunk aborts / rate-limit waits. */
   let persistedCursor = 0
+  /** In-flight read position within the current slice — may be ahead of persistedCursor. */
+  let inFlightScanned = 0
 
   try {
     const [{ data: job }, { data: profile }] = await Promise.all([
@@ -183,6 +187,7 @@ export async function runScanChunk(
 
     globalCursor = scanCheckpoint(existingJob)
     persistedCursor = globalCursor
+    inFlightScanned = globalCursor
 
     if (useIncremental) {
       const { error: incErr } = await admin.from('scan_jobs').upsert({
@@ -245,6 +250,7 @@ export async function runScanChunk(
       if (startErr) throw new Error(`Failed to start scan: ${startErr.message}`)
       globalCursor = 0
       persistedCursor = 0
+      inFlightScanned = 0
     }
 
     const refreshToken = await getRefreshTokenForUser(admin, userId)
@@ -297,6 +303,7 @@ export async function runScanChunk(
           {
             onProgress: async phase => onProgress(0, 0, phase),
             signal: ac.signal,
+            deadline,
           }
         )
       } catch (err: unknown) {
@@ -342,6 +349,7 @@ export async function runScanChunk(
     let messageTotal = jobState?.total ?? 0
     globalCursor = scanCheckpoint(jobState)
     persistedCursor = globalCursor
+    inFlightScanned = globalCursor
     let listPageToken: string | null = jobState?.list_page_token ?? null
 
     if (!listingDone) {
@@ -389,8 +397,21 @@ export async function runScanChunk(
           cursor: persistedCursor,
           phase: listingDone
             ? `Found ${messageTotal.toLocaleString()} emails — scanning...`
-            : `Fetching email list… ${messageTotal.toLocaleString()} found`,
+            : chunk.pausedForQuota
+              ? `Gmail is temporarily busy — ${messageTotal.toLocaleString()} emails found so far, resuming shortly...`
+              : `Fetching email list… ${messageTotal.toLocaleString()} found`,
         })
+
+        if (chunk.pausedForQuota) {
+          clearInterval(cancelPoll)
+          return {
+            continued: true,
+            quotaPaused: true,
+            phase: 'listing',
+            total: messageTotal,
+            scanned: persistedCursor,
+          }
+        }
 
         if (listingDone || Date.now() >= deadline) break
       }
@@ -459,49 +480,91 @@ export async function runScanChunk(
     }
 
     const sliceBase = globalCursor
+    inFlightScanned = sliceBase
     const startedAt = Date.now()
-    const { cursor: sliceCursor, chunkSenders } = await scanMessageIds(gmail, ids, senderMap, {
-      signal: ac.signal,
-      startIndex: 0,
-      deadline,
-      onRateLimited: async () => {
-        await onProgress(
-          persistedCursor,
-          messageTotal,
-          'Gmail rate limit — waiting a moment...'
-        )
-      },
-      onProgress: async (scannedInSlice) => {
-        const globalScanned = sliceBase + scannedInSlice
-        const elapsed = Date.now() - startedAt
-        const processed = globalScanned - sliceBase
-        const rate = processed / Math.max(elapsed, 1)
-        const etaMs = rate > 0 ? (messageTotal - globalScanned) / rate : 0
-        const etaMins = Math.ceil(etaMs / 60_000)
-        const etaText = processed > 0 && globalScanned < messageTotal
-          ? (etaMins <= 60
-            ? ` · ~${etaMins} min left`
-            : ` · ~${Math.ceil(etaMins / 60)} hr left`)
-          : ''
-        await onProgress(
-          globalScanned,
-          messageTotal,
-          `Reading ${globalScanned.toLocaleString()} / ${messageTotal.toLocaleString()} emails${etaText}`
-        )
-      },
-    })
 
-    globalCursor = sliceBase + sliceCursor
-    if (chunkSenders.length > 0) {
-      await upsertSendersList(admin, userId, chunkSenders)
-      await classify(chunkSenders, userId, admin)
+    // Read the slice in small sub-slices, committing senders + cursor after
+    // each. This bounds what a crash, hard kill, or quota pause can lose to
+    // ~CHECKPOINT_EVERY messages. Previously the cursor only advanced once per
+    // 7k slice — a Gmail quota stall could overrun the function's lifetime and
+    // the kill threw away the whole slice, restarting the read from the chunk
+    // start on every retry (the "progress resets to 0" loop).
+    const CHECKPOINT_EVERY = 500
+    const touchedEmails = new Set<string>()
+    let quotaPaused = false
+
+    const reportReadProgress = async (globalScanned: number) => {
+      inFlightScanned = globalScanned
+      const elapsed = Date.now() - startedAt
+      const processed = globalScanned - sliceBase
+      const rate = processed / Math.max(elapsed, 1)
+      const etaMs = rate > 0 ? (messageTotal - globalScanned) / rate : 0
+      const etaMins = Math.ceil(etaMs / 60_000)
+      const etaText = processed > 0 && globalScanned < messageTotal
+        ? (etaMins <= 60
+          ? ` · ~${etaMins} min left`
+          : ` · ~${Math.ceil(etaMins / 60)} hr left`)
+        : ''
+      await onProgress(
+        globalScanned,
+        messageTotal,
+        `Reading ${globalScanned.toLocaleString()} / ${messageTotal.toLocaleString()} emails${etaText}`
+      )
     }
-    persistedCursor = globalCursor
-    await saveScanProgress(admin, userId, {
-      scanned: globalCursor,
-      cursor: globalCursor,
-      total: messageTotal,
-    })
+
+    while (globalCursor - sliceBase < ids.length) {
+      if (Date.now() >= deadline || ac.signal.aborted) break
+
+      const offset = globalCursor - sliceBase
+      const subIds = ids.slice(offset, offset + CHECKPOINT_EVERY)
+      const subBase = globalCursor
+
+      const sub = await scanMessageIds(gmail, subIds, senderMap, {
+        signal: ac.signal,
+        startIndex: 0,
+        deadline,
+        onRateLimited: async () => {
+          await onProgress(
+            inFlightScanned,
+            messageTotal,
+            'Gmail is temporarily busy — pausing for a moment...'
+          )
+        },
+        onProgress: async scannedInSub => reportReadProgress(subBase + scannedInSub),
+      })
+
+      if (sub.chunkSenders.length > 0) {
+        await upsertSendersList(admin, userId, sub.chunkSenders)
+        for (const s of sub.chunkSenders) touchedEmails.add(s.sender_email)
+      }
+      // Commit the cursor only after the senders covering it are persisted —
+      // resume must never skip messages whose senders were not saved.
+      globalCursor = subBase + sub.cursor
+      persistedCursor = globalCursor
+      inFlightScanned = Math.max(inFlightScanned, globalCursor)
+      await saveScanProgress(admin, userId, {
+        scanned: globalCursor,
+        cursor: globalCursor,
+        total: messageTotal,
+      })
+
+      if (sub.pausedForQuota) {
+        quotaPaused = true
+        break
+      }
+      // Deadline or cancellation ended the sub-slice early.
+      if (sub.cursor < subIds.length) break
+    }
+
+    // Classify once per chunk. Safe even if this invocation dies here: the
+    // cursor is already committed, and finalizePartialScan / finalizeScan
+    // classify any senders left unclassified.
+    const sendersToClassify = [...touchedEmails]
+      .map(email => senderMap.get(email))
+      .filter((s): s is SenderData => !!s)
+    if (sendersToClassify.length > 0) {
+      await classify(sendersToClassify, userId, admin)
+    }
 
     if (ac.signal.aborted) {
       clearInterval(cancelPoll)
@@ -520,6 +583,25 @@ export async function runScanChunk(
     }
 
     clearInterval(cancelPoll)
+
+    if (quotaPaused && globalCursor < messageTotal) {
+      // Not an error — progress is committed; a delayed continuation resumes
+      // from the saved cursor once Gmail's per-minute quota recovers.
+      await saveScanProgress(admin, userId, {
+        status: 'scanning',
+        scanned: globalCursor,
+        total: messageTotal,
+        cursor: globalCursor,
+        list_complete: true,
+        phase: `Gmail is temporarily busy — ${globalCursor.toLocaleString()} / ${messageTotal.toLocaleString()} emails saved, resuming shortly...`,
+      })
+      return {
+        continued: true,
+        quotaPaused: true,
+        scanned: globalCursor,
+        total: messageTotal,
+      }
+    }
 
     const scanComplete = globalCursor >= messageTotal
 
@@ -578,17 +660,18 @@ export async function runScanChunk(
     const message = err instanceof Error ? err.message : 'Scan failed'
     const recoverable = isRecoverableScanError(message)
     const partial = await finalizePartialScan(admin, userId)
+    const displayScanned = Math.max(persistedCursor, inFlightScanned)
     await saveScanProgress(admin, userId, {
       status: 'error',
       phase: scanErrorPhase(message, partial),
-      scanned: persistedCursor,
+      scanned: displayScanned,
       cursor: persistedCursor,
       chunk_locked_at: null,
     })
     return {
       error: message,
       continued: recoverable,
-      scanned: persistedCursor,
+      scanned: displayScanned,
       ...partial,
     }
   } finally {

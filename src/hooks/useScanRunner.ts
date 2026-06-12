@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { AUTO_RESUME_MARKER } from '@/lib/scan/scanErrors'
 import { hasIncompleteScan } from '@/lib/scan/scanState'
 import type { ScanProgress } from '@/types'
 
@@ -22,7 +23,7 @@ const STALE_KICK_MS = 3 * 60 * 1000
 function scanNeedsContinuation(data: ScanProgress): boolean {
   if (data.status === 'cancelled') return false
   if (data.action_type) return false
-  if (data.status === 'error' && data.phase.includes('will resume automatically')) return true
+  if (data.status === 'error' && data.phase.includes(AUTO_RESUME_MARKER)) return true
   if (data.status !== 'scanning' && data.status !== 'error') return false
   if (data.list_complete === false) return true
   const checkpoint = data.cursor ?? 0
@@ -36,7 +37,7 @@ export function canContinueScan(data: ScanProgress): boolean {
   if (data.status === 'complete') return false
   if (!hasIncompleteScan(data)) return false
   if (data.status === 'scanning') return true
-  if (data.status === 'error' && data.phase.includes('will resume automatically')) return true
+  if (data.status === 'error' && data.phase.includes(AUTO_RESUME_MARKER)) return true
   if (data.status === 'cancelled') return true
   return false
 }
@@ -47,7 +48,7 @@ function isProgressStale(data: ScanProgress): boolean {
 }
 
 function isAutoResumingError(data: ScanProgress): boolean {
-  return data.status === 'error' && data.phase.includes('will resume automatically')
+  return data.status === 'error' && data.phase.includes(AUTO_RESUME_MARKER)
 }
 
 export function useScanRunner(options: UseScanRunnerOptions = {}) {
@@ -139,40 +140,47 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       return
     }
 
+    const runOnce = async (chunkOpts?: StartScanOptions) => {
+      const gen = scanGeneration.current
+      try {
+        const res = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(chunkOpts ?? {}),
+          cache: 'no-store',
+        })
+        if (gen !== scanGeneration.current) return
+
+        const data = await res.json().catch(() => ({}))
+        if (data.error === 'gmail_auth_expired') {
+          onAuthExpired?.()
+          return
+        }
+
+        // Sync UI with server-written error / progress state immediately.
+        await pollProgress()
+
+        if (!res.ok && activeRef.current && data.error && data.continued === false) {
+          setScanError(true)
+          setIsScanning(false)
+          activeRef.current = false
+        }
+      } catch {
+        await pollProgress()
+      }
+    }
+
     chunkInFlight.current = true
-    const gen = scanGeneration.current
     try {
-      const res = await fetch('/api/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(opts ?? {}),
-        cache: 'no-store',
-      })
-      if (gen !== scanGeneration.current) return
-
-      const data = await res.json().catch(() => ({}))
-      if (data.error === 'gmail_auth_expired') {
-        onAuthExpired?.()
-        return
+      // Drain loop: user clicks queued while a chunk was in flight run next.
+      let current: StartScanOptions | null = opts ?? {}
+      while (current) {
+        await runOnce(current)
+        current = pendingUserChunk.current
+        pendingUserChunk.current = null
       }
-
-      // Sync UI with server-written error / progress state immediately.
-      await pollProgress()
-
-      if (!res.ok && activeRef.current && data.error && data.continued === false) {
-        setScanError(true)
-        setIsScanning(false)
-        activeRef.current = false
-      }
-    } catch {
-      await pollProgress()
     } finally {
       chunkInFlight.current = false
-      const pending = pendingUserChunk.current
-      if (pending) {
-        pendingUserChunk.current = null
-        void requestChunk(pending, 'user')
-      }
     }
   }, [onAuthExpired, pollProgress])
 

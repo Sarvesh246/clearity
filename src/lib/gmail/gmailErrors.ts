@@ -1,5 +1,14 @@
 /** Shared classification of googleapis/gaxios errors for retry decisions. */
 
+export function getErrorMessage(err: unknown): string {
+  const e = err as {
+    message?: string
+    response?: { data?: { error?: { message?: string } } }
+  }
+  return e?.response?.data?.error?.message
+    ?? (err instanceof Error ? err.message : String(err))
+}
+
 export function getHttpStatus(err: unknown): number | undefined {
   return (err as { response?: { status?: number } })?.response?.status
     ?? (err as { status?: number })?.status
@@ -14,6 +23,18 @@ export function isRateLimit(err: unknown): boolean {
   // Gmail sometimes signals user-rate limits as 403 with a specific reason.
   const reason = (err as { errors?: Array<{ reason?: string }> })?.errors?.[0]?.reason
   return status === 403 && (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded')
+}
+
+/** Per-minute query caps and other Gmail quota messages — retry, never fail the chunk. */
+export function isGmailQuotaOrRateLimit(err: unknown): boolean {
+  if (isRateLimit(err)) return true
+  const msg = getErrorMessage(err).toLowerCase()
+  return (
+    msg.includes('quota exceeded') ||
+    msg.includes('queries per minute') ||
+    msg.includes('rate limit exceeded') ||
+    msg.includes('userratelimitexceeded')
+  )
 }
 
 /** Messages deleted/moved between listing and fetching return 404/410. */

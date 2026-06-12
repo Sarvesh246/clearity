@@ -166,7 +166,7 @@ Fill in `.env.local`:
 ### Stage 11 known limitations
 - Requires `SCAN_WORKER_SECRET` + `CRON_SECRET` env vars (app + Vercel) and the Stage 11 SQL migration applied; without the worker secret, scans stall when the tab closes.
 - Clicking "Scan" within ~3s of "Cancel" can no-op once (old chunk still releasing the lock) — click again; it self-heals.
-- Intra-slice crash re-scans up to one slice (~7k msgs); upserts are idempotent so no data corruption.
+- Intra-slice crash re-scans at most one sub-slice (~500 msgs) since the Stage 13 checkpointing pass; a crash in the narrow window between sender upsert and cursor commit can double-count up to that many messages.
 
 ## Stage 12 — Production hardening (full-debug pass)
 
@@ -183,6 +183,17 @@ Fill in `.env.local`:
 - **Gmail retry hardening** (`src/lib/gmail/gmailErrors.ts`): shared 429/403-rate/5xx/network-error classification; `withGmailRetry` on batchModify, per-sender `messages.list` (also quoted `from:"..."` queries), scan listing, and history.list; scanner treats dropped connections (ECONNRESET etc.) as transient.
 - **Gemini model**: `gemini-1.5-flash` is retired (every call 404'd → silent rule-based fallback); now `gemini-2.5-flash`, with quota detection also via message text (`RESOURCE_EXHAUSTED`).
 - Lint is fully clean (`npm run lint` → 0 problems): ActionBar countdown rewritten as a handler-driven interval (no setState-in-effect, no double-fire), ProgressModal ETA/stall state moved out of render, InstallPrompt defers its mount setState.
+
+## Stage 13 — Quota-proof checkpointing (June 2026)
+
+Root cause of "scan progress resets to 0 on quota": the resume cursor was only committed once per 7k-message slice (after sender upsert), and the rate-limit backoff loop in `fetchBatch` ignored the chunk time budget — persistent 429s made the function sleep past `maxDuration`, Vercel hard-killed it before the commit, and every retry re-read the slice from the chunk start.
+
+### Fixed
+- **Sub-slice checkpointing** (`runScanChunk`): the 7k slice is read in 500-message sub-slices; after each one, touched senders are upserted and the cursor committed (upsert BEFORE cursor — resume must never skip unsaved messages). Any crash/kill/quota pause now loses ≤500 messages instead of the whole slice. Classification still runs once per chunk; `finalizePartialScan`/`finalizeScan` sweep up unclassified senders.
+- **Deadline-aware quota backoff** (`scanner.ts` `fetchBatch` + `GmailQuotaPauseError`): if waiting out a 429 backoff would overrun the time budget, the scan pauses gracefully — `scanMessageIds` returns `pausedForQuota` with partial progress, the chunk commits and stays `status='scanning'` with a friendly phase, and the routes reschedule the continuation with a 45s delay so the per-minute quota window rolls over.
+- **Listing-phase quota pause** (`listMessages.ts`): quota errors mid-listing keep the pages already fetched + the current token (previously the whole invocation's pages were thrown away); listing also caps at 20 pages per call so the page token is persisted every ~10k IDs.
+- **Time budget 270s → 240s** (`CHUNK_TIME_BUDGET_MS`): leaves ~60s under `maxDuration=300` for the final upsert/classify/status writes.
+- Quota pause is NOT an error state: no scary red error, progress bar keeps its committed value, scan auto-continues. The `status='error'` + `AUTO_RESUME_MARKER` path remains as fallback for stray quota throws outside the read loop.
 
 ### Stage 12 known limitations
 - A bulk action over very many emails (≫100k) can exceed the 300s budget; the killed run leaves `scan_jobs` stuck `scanning` until the next scan/action overwrites it (chunk lock self-heals via 6-min staleness; the modal must be dismissed manually).

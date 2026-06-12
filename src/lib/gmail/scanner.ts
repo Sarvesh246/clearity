@@ -1,7 +1,7 @@
 import { gmail_v1 } from 'googleapis'
 import { parseFrom } from './parseFrom'
 import { parseUnsubscribe } from './parseUnsubscribe'
-import { isGone, isRateLimit, isTransient } from './gmailErrors'
+import { isGone, isGmailQuotaOrRateLimit, isTransient } from './gmailErrors'
 import { ScanCancelledError } from '@/types'
 
 export interface SenderData {
@@ -36,8 +36,13 @@ export interface ScanMessageIdsOptions {
   startIndex?: number
 }
 
-/** ~4.5 min per Vercel invocation — leave headroom under the 5 min limit. */
-export const CHUNK_TIME_BUDGET_MS = 270_000
+/**
+ * ~4 min per Vercel invocation. The remaining ~60s under the 300s maxDuration
+ * covers post-loop work (final sender upsert, per-chunk classification, status
+ * writes) so a chunk that uses its whole read budget still exits cleanly
+ * instead of being hard-killed mid-commit.
+ */
+export const CHUNK_TIME_BUDGET_MS = 240_000
 
 // Gmail quota reality (per the official "Usage limits" table):
 //   • Per-user rate limit: 250 quota units / user / SECOND (a moving average).
@@ -60,6 +65,19 @@ function sleep(ms: number) {
 
 function checkCancelled(signal?: AbortSignal) {
   if (signal?.aborted) throw new ScanCancelledError()
+}
+
+/**
+ * Raised when Gmail is rate-limiting and waiting out the backoff would blow
+ * the invocation's time budget. The chunk must commit progress and let a later
+ * (delayed) continuation pick up — NOT keep sleeping until Vercel hard-kills
+ * the function, which would lose everything since the last cursor commit.
+ */
+export class GmailQuotaPauseError extends Error {
+  constructor() {
+    super('Gmail rate limit exceeded — pausing until quota recovers')
+    this.name = 'GmailQuotaPauseError'
+  }
 }
 
 /**
@@ -130,6 +148,7 @@ async function fetchBatch(
   gmail: gmail_v1.Gmail,
   ids: string[],
   throttle: AdaptiveThrottle,
+  deadline: number,
   signal?: AbortSignal,
   onRateLimited?: () => Promise<void>
 ): Promise<gmail_v1.Schema$Message[]> {
@@ -152,7 +171,7 @@ async function fetchBatch(
         if (outcome.status === 'fulfilled') {
           if (outcome.value.message) results.push(outcome.value.message)
           // null → message gone, skip silently
-        } else if (isRateLimit(outcome.reason)) {
+        } else if (isGmailQuotaOrRateLimit(outcome.reason)) {
           retry.push(pending[k])
         } else {
           throw outcome.reason
@@ -168,6 +187,11 @@ async function fetchBatch(
         rateLimitedThisWave = true
         throttle.onRateLimit()
         await onRateLimited?.()
+        // Waiting out the backoff would overrun the invocation budget — bail
+        // so the caller can checkpoint and resume in a delayed continuation.
+        if (Date.now() + throttle.backoffMs() >= deadline) {
+          throw new GmailQuotaPauseError()
+        }
         await sleep(throttle.backoffMs())
         pending = retry
       }
@@ -278,6 +302,8 @@ export interface ScanMessageIdsResult {
   /** Index within the provided ids array (not global). */
   cursor: number
   chunkSenders: SenderData[]
+  /** True when Gmail rate limits forced an early stop — resume after a delay. */
+  pausedForQuota: boolean
 }
 
 /**
@@ -301,6 +327,7 @@ export async function scanMessageIds(
   let cursor = startIndex
   const chunkEmails = new Set<string>()
   const throttle = new AdaptiveThrottle()
+  let pausedForQuota = false
 
   let lastReported = startIndex
   try {
@@ -309,7 +336,7 @@ export async function scanMessageIds(
       checkCancelled(signal)
 
       const wave = ids.slice(i, i + PARALLEL)
-      const messages = await fetchBatch(gmail, wave, throttle, signal, onRateLimited)
+      const messages = await fetchBatch(gmail, wave, throttle, deadline, signal, onRateLimited)
 
       for (const msg of messages) {
         const headers = msg.payload?.headers ?? []
@@ -326,9 +353,15 @@ export async function scanMessageIds(
       }
     }
   } catch (err) {
-    // User cancelled — return partial progress so the caller can upsert senders
-    // for everything read so far in this slice (don't throw away mid-chunk work).
-    if (!(err instanceof ScanCancelledError)) throw err
+    // User cancelled or Gmail quota — return partial progress so the caller can
+    // upsert senders for everything read so far in this slice.
+    if (err instanceof GmailQuotaPauseError || isGmailQuotaOrRateLimit(err)) {
+      pausedForQuota = true
+    } else if (err instanceof ScanCancelledError) {
+      // fall through to return partial cursor + chunkSenders
+    } else {
+      throw err
+    }
   }
 
   if (cursor !== lastReported) await onProgress(cursor, total)
@@ -337,7 +370,7 @@ export async function scanMessageIds(
     .map(email => senderMap.get(email))
     .filter((s): s is SenderData => !!s)
 
-  return { cursor, chunkSenders }
+  return { cursor, chunkSenders, pausedForQuota }
 }
 
 /** Legacy single-request scan — prefer chunked scan via /api/scan for large inboxes. */
@@ -354,7 +387,7 @@ export async function scanInbox(
   const { cursor: done } = await scanMessageIds(gmail, allIds, senderMap, {
     signal,
     onRateLimited: async () => {
-      await onProgress(0, total, 'Gmail rate limit — waiting a moment...')
+      await onProgress(0, total, 'Gmail is temporarily busy — pausing for a moment...')
     },
     onProgress: async (scanned) => {
       const elapsed = Date.now() - startedAt
