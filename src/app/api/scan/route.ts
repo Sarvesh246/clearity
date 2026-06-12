@@ -263,8 +263,9 @@ export async function POST(request: NextRequest) {
           signal: ac.signal,
           onProgress: async foundInChunk => {
             const found = existingCount + foundInChunk
+            // scanned stays 0 during listing — only metadata-read progress counts
             await onProgress(
-              found,
+              0,
               found,
               `Fetching email list… ${found.toLocaleString()} found`
             )

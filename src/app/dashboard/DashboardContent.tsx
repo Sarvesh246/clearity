@@ -72,7 +72,12 @@ export default function DashboardContent({
     startScan(opts)
   }
 
-  const pct = progress.total > 0 ? Math.round((progress.scanned / progress.total) * 100) : 0
+  const isListing = isRescanning && progress.list_complete === false
+  const pct = isListing
+    ? 0
+    : progress.total > 0
+      ? Math.min(99, Math.round((progress.scanned / progress.total) * 100))
+      : 0
   const hasScan = health !== null
 
   return (
@@ -121,15 +126,28 @@ export default function DashboardContent({
             </div>
           </div>
           <div className="neu-inset overflow-hidden" style={{ height: 8, borderRadius: 99 }}>
-            <div style={{
-              width: `${pct}%`, height: '100%', background: '#45aaf2',
-              borderRadius: 99, transition: 'width 0.4s ease', minWidth: pct > 0 ? 8 : 0,
-            }} />
+            {isListing ? (
+              <div
+                className="h-full w-1/3"
+                style={{
+                  background: '#45aaf2',
+                  borderRadius: 99,
+                  animation: 'scan-indeterminate 1.5s ease-in-out infinite',
+                }}
+              />
+            ) : (
+              <div style={{
+                width: `${pct}%`, height: '100%', background: '#45aaf2',
+                borderRadius: 99, transition: 'width 0.4s ease', minWidth: pct > 0 ? 8 : 0,
+              }} />
+            )}
           </div>
           {progress.total > 0 && (
             <div className="flex items-center justify-between">
               <p className="text-xs" style={{ color: '#555568' }}>
-                {pct}% — {progress.scanned.toLocaleString()} / {progress.total.toLocaleString()} emails
+                {isListing
+                  ? `${progress.total.toLocaleString()} emails found so far`
+                  : `${pct}% — ${progress.scanned.toLocaleString()} / ${progress.total.toLocaleString()} emails`}
               </p>
               <button
                 onClick={cancelScan}

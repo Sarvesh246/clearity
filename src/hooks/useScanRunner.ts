@@ -98,11 +98,12 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       }
 
       if (data.status === 'complete') {
+        const wasActive = activeRef.current
         activeRef.current = false
         setIsScanning(false)
         setIsPaused(false)
         stopPolling()
-        onComplete?.()
+        if (wasActive) onComplete?.()
       } else if (data.status === 'error' && !data.phase.includes('resume')) {
         activeRef.current = false
         setIsScanning(false)
@@ -154,6 +155,12 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       if (!res.ok) return
       const data: ScanProgress = await res.json()
       setProgress(data)
+
+      if (data.status === 'complete') {
+        setIsScanning(false)
+        setIsPaused(false)
+        return
+      }
 
       if (data.status === 'cancelled') {
         setIsPaused(true)

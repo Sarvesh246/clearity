@@ -37,7 +37,12 @@ export default function DashboardClient({ email }: Props) {
     startScan(resume ? { resume: true } : { full: true })
   }
 
-  const pct = progress.total > 0 ? Math.round((progress.scanned / progress.total) * 100) : 0
+  const isListing = isScanning && progress.list_complete === false
+  const pct = isListing
+    ? 0
+    : progress.total > 0
+      ? Math.min(99, Math.round((progress.scanned / progress.total) * 100))
+      : 0
 
   return (
     <div className="w-full max-w-sm flex flex-col gap-6">
@@ -83,16 +88,27 @@ export default function DashboardClient({ email }: Props) {
               className="neu-inset w-full overflow-hidden"
               style={{ height: 8, borderRadius: 99 }}
             >
-              <div
-                style={{
-                  width: `${pct}%`,
-                  height: '100%',
-                  background: '#45aaf2',
-                  borderRadius: 99,
-                  transition: 'width 0.4s ease',
-                  minWidth: pct > 0 ? 8 : 0,
-                }}
-              />
+              {isListing ? (
+                <div
+                  className="h-full w-1/3"
+                  style={{
+                    background: '#45aaf2',
+                    borderRadius: 99,
+                    animation: 'scan-indeterminate 1.5s ease-in-out infinite',
+                  }}
+                />
+              ) : (
+                <div
+                  style={{
+                    width: `${pct}%`,
+                    height: '100%',
+                    background: '#45aaf2',
+                    borderRadius: 99,
+                    transition: 'width 0.4s ease',
+                    minWidth: pct > 0 ? 8 : 0,
+                  }}
+                />
+              )}
             </div>
 
             <p className="text-sm font-medium" style={{ color: '#8888a0' }}>
@@ -101,7 +117,9 @@ export default function DashboardClient({ email }: Props) {
 
             {progress.total > 0 && (
               <p className="text-xs" style={{ color: '#555568' }}>
-                {pct}% — {progress.scanned.toLocaleString()} / {progress.total.toLocaleString()} emails
+                {isListing
+                  ? `${progress.total.toLocaleString()} emails found so far`
+                  : `${pct}% — ${progress.scanned.toLocaleString()} / ${progress.total.toLocaleString()} emails`}
               </p>
             )}
           </div>
