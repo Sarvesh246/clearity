@@ -28,8 +28,9 @@ export async function POST() {
         ? `Stopped — ${partial.senderCount.toLocaleString()} senders saved and ready to review`
         : 'Scan cancelled',
       completed_at: now,
-      list_page_token: null,
-      list_complete: true,
+      chunk_locked_at: null,
+      // Keep scanned / cursor / total / list state so progress and partial
+      // results stay visible — do not wipe checkpoints or message IDs.
     })
     .eq('user_id', user.id)
 

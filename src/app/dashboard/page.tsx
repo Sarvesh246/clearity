@@ -29,7 +29,7 @@ export default async function DashboardPage() {
   const isPartialScan =
     allSenders.length > 0 &&
     scanJob != null &&
-    scanJob.status !== 'complete'
+    (scanJob.status === 'cancelled' || scanJob.status === 'scanning' || scanJob.status === 'error')
 
   const junkCount      = allSenders.filter(s => s.classification === 'junk').length
   const unsureCount    = allSenders.filter(s => s.classification === 'unsure').length

@@ -20,16 +20,19 @@ function scanNeedsContinuation(data: ScanProgress): boolean {
   if (data.status === 'cancelled') return false
   if (data.action_type) return false
   if (data.status === 'error' && data.phase.includes('resume')) return true
-  if (data.status !== 'scanning') return false
+  if (data.status !== 'scanning' && data.status !== 'error') return false
   if (data.list_complete === false) return true
-  if (data.total > 0 && data.scanned < data.total) return true
+  const checkpoint = Math.max(data.cursor ?? 0, data.scanned ?? 0)
+  if (data.total > 0 && checkpoint < data.total) return true
   if (data.phase.toLowerCase().includes('fetching email list')) return true
+  if (data.phase.toLowerCase().includes('rebuilding email list')) return true
   return false
 }
 
 export function canContinueScan(data: ScanProgress): boolean {
   if (data.status === 'cancelled' || data.status === 'complete') return false
-  if (data.total <= 0 || data.scanned >= data.total) return false
+  const checkpoint = Math.max(data.cursor ?? 0, data.scanned ?? 0)
+  if (data.total <= 0 || checkpoint >= data.total) return false
   if (data.status === 'scanning') return true
   if (data.status === 'error' && data.phase.includes('resume')) return true
   return false
@@ -181,12 +184,19 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
     stopPolling()
     setIsScanning(false)
     setIsPaused(false)
-    setProgress(prev => ({
-      ...prev,
-      status: 'cancelled',
-      phase: 'Scan cancelled',
-    }))
-    await fetch('/api/scan/cancel', { method: 'POST' }).catch(() => {})
+    try {
+      const res = await fetch('/api/scan/cancel', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      setProgress(prev => ({
+        ...prev,
+        status: 'cancelled',
+        phase: data.senderCount > 0
+          ? `Stopped — ${Number(data.senderCount).toLocaleString()} senders saved and ready to review`
+          : 'Scan cancelled',
+      }))
+    } catch {
+      setProgress(prev => ({ ...prev, status: 'cancelled', phase: 'Scan cancelled' }))
+    }
     onComplete?.()
   }, [onComplete, stopPolling])
 

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { scheduleScanContinuation } from '@/lib/scan/scheduleContinuation'
+import { hasIncompleteScan } from '@/lib/scan/scanState'
 
 export const maxDuration = 60
 
@@ -36,7 +37,7 @@ export async function GET(req: Request) {
   // strand despite the UI promising "will resume automatically".
   const { data: jobs, error } = await admin
     .from('scan_jobs')
-    .select('user_id, status, phase, scanned, total, list_complete, list_page_token, updated_at, chunk_locked_at')
+    .select('user_id, status, phase, scanned, total, cursor, list_complete, list_page_token, updated_at, chunk_locked_at')
     .in('status', ['scanning', 'error'])
     .is('action_type', null)
     .lt('updated_at', staleBefore)
@@ -50,10 +51,7 @@ export async function GET(req: Request) {
     // Auth expiry is not recoverable without the user signing in again.
     if (job.phase === 'Gmail access expired') continue
 
-    const incomplete =
-      job.list_complete === false ||
-      job.list_page_token != null ||
-      (job.total > 0 && (job.scanned ?? 0) < job.total)
+    const incomplete = hasIncompleteScan(job)
 
     if (!incomplete) continue
 

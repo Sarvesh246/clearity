@@ -16,6 +16,11 @@ import {
 import { finalizePartialScan } from '@/lib/scan/classifyPartial'
 import { loadSendersIntoMap, upsertSendersList } from '@/lib/scan/persistence'
 import { tryAcquireChunkLock, releaseChunkLock } from '@/lib/scan/chunkLock'
+import {
+  canResumeScan,
+  hasIncompleteScan,
+  scanCheckpoint,
+} from '@/lib/scan/scanState'
 import { ScanCancelledError } from '@/types'
 
 // One slice per worker invocation. The scan loop stops at the Vercel time budget
@@ -145,6 +150,8 @@ export async function runScanChunk(
   const runStartedAt = new Date().toISOString()
   let cancelPoll: ReturnType<typeof setInterval> | undefined
   let globalCursor = 0
+  /** Latest checkpoint written to DB — survives mid-chunk aborts / rate-limit waits. */
+  let persistedCursor = 0
 
   try {
     const [{ data: job }, { data: profile }] = await Promise.all([
@@ -153,20 +160,11 @@ export async function runScanChunk(
     ])
 
     const existingJob = job as ScanJobRow | null
-    const total = existingJob?.total ?? 0
-    const cursor = existingJob?.cursor ?? 0
-    const listComplete = existingJob?.list_complete ?? false
 
-    const hasIncompleteScan =
-      existingJob &&
-      (!listComplete || cursor < total) &&
-      (total > 0 || existingJob.list_page_token)
-
-    const canResume =
-      !forceFull &&
-      existingJob?.status !== 'cancelled' &&
-      (resumeRequested || existingJob?.status === 'scanning' || existingJob?.status === 'error') &&
-      hasIncompleteScan
+    const canResume = canResumeScan(existingJob, {
+      forceFull,
+      resumeRequested,
+    })
 
     const useIncremental =
       !forceFull &&
@@ -174,14 +172,16 @@ export async function runScanChunk(
       !!profile?.last_scan_at &&
       !!profile?.gmail_history_id
 
-    // A background continuation may only resume in-progress chunked work. If
-    // there's nothing to resume (scan completed, was cancelled, or was already
-    // superseded by a fresh start), bail out rather than launching new work.
+    // A background continuation may only resume in-progress chunked work. Such calls must only RESUME an
+    // in-progress scan — never start a fresh or incremental one. This prevents a
+    // stray continuation (e.g. fired moments before the user cancels) from wiping
+    // saved senders and silently restarting a full rescan.
     if (continuation && !canResume) {
       return { skipped: true }
     }
 
-    globalCursor = cursor
+    globalCursor = scanCheckpoint(existingJob)
+    persistedCursor = globalCursor
 
     if (useIncremental) {
       const { error: incErr } = await admin.from('scan_jobs').upsert({
@@ -196,6 +196,7 @@ export async function runScanChunk(
       })
       if (incErr) throw new Error(`Failed to start sync: ${incErr.message}`)
     } else if (canResume) {
+      const listComplete = existingJob?.list_complete ?? false
       // Conditional update: don't overwrite 'cancelled'. A cancel request may
       // have landed between our lock acquisition and this write — if so, the
       // WHERE clause matches zero rows and we skip rather than silently
@@ -220,6 +221,9 @@ export async function runScanChunk(
         return { skipped: true }
       }
     } else {
+      if (!forceFull && hasIncompleteScan(existingJob)) {
+        return { skipped: true }
+      }
       await clearMessageIds(admin, userId)
       await admin.from('user_senders').delete().eq('user_id', userId)
       const { error: startErr } = await admin.from('scan_jobs').upsert({
@@ -238,6 +242,8 @@ export async function runScanChunk(
         updated_at: runStartedAt,
       })
       if (startErr) throw new Error(`Failed to start scan: ${startErr.message}`)
+      globalCursor = 0
+      persistedCursor = 0
     }
 
     const refreshToken = await getRefreshTokenForUser(admin, userId)
@@ -264,8 +270,18 @@ export async function runScanChunk(
       }
     }, 3000)
 
-    const onProgress = async (scanned: number, totalCount: number, phase: string) => {
-      await saveScanProgress(admin, userId, { scanned, total: totalCount, phase })
+    const onProgress = async (
+      scanned: number,
+      totalCount: number,
+      phase: string,
+      opts?: { persistCursor?: number }
+    ) => {
+      const fields: Record<string, unknown> = { scanned, total: totalCount, phase }
+      if (opts?.persistCursor !== undefined) {
+        fields.cursor = opts.persistCursor
+        persistedCursor = opts.persistCursor
+      }
+      await saveScanProgress(admin, userId, fields)
     }
 
     if (useIncremental) {
@@ -317,13 +333,14 @@ export async function runScanChunk(
 
     const { data: jobState } = await admin
       .from('scan_jobs')
-      .select('list_complete, list_page_token, total, cursor')
+      .select('list_complete, list_page_token, total, cursor, scanned')
       .eq('user_id', userId)
       .single()
 
     let listingDone = jobState?.list_complete ?? false
     let messageTotal = jobState?.total ?? 0
-    globalCursor = jobState?.cursor ?? 0
+    globalCursor = scanCheckpoint(jobState)
+    persistedCursor = globalCursor
     let listPageToken: string | null = jobState?.list_page_token ?? null
 
     if (!listingDone) {
@@ -367,7 +384,8 @@ export async function runScanChunk(
           list_page_token: listPageToken,
           list_complete: listingDone,
           total: messageTotal,
-          scanned: globalCursor,
+          scanned: persistedCursor,
+          cursor: persistedCursor,
           phase: listingDone
             ? `Found ${messageTotal.toLocaleString()} emails — scanning...`
             : `Fetching email list… ${messageTotal.toLocaleString()} found`,
@@ -382,7 +400,7 @@ export async function runScanChunk(
           continued: true,
           phase: 'listing',
           total: messageTotal,
-          scanned: globalCursor,
+          scanned: persistedCursor,
         }
       }
     } else {
@@ -403,22 +421,40 @@ export async function runScanChunk(
     const ids = await loadMessageIdsForRange(admin, userId, globalCursor, globalCursor + ID_SLICE)
 
     if (ids.length === 0 && globalCursor < messageTotal) {
-      // The persisted message-id list was lost (cleared by an interrupted
-      // finalize or a partial write) while the cursor still says there's more to
-      // read. Throwing here just loops forever — instead, reset the listing
-      // state so the next chunk rebuilds the list from scratch and self-heals.
-      await clearMessageIds(admin, userId)
+      const actualCount = await countMessageIds(admin, userId)
+
+      if (actualCount === 0) {
+        // ID table lost — re-list without wiping senders or zeroing the checkpoint.
+        await saveScanProgress(admin, userId, {
+          status: 'scanning',
+          phase: `Rebuilding email list (resuming from ${persistedCursor.toLocaleString()})...`,
+          list_page_token: null,
+          list_complete: false,
+          total: 0,
+          scanned: persistedCursor,
+          cursor: persistedCursor,
+        })
+        clearInterval(cancelPoll)
+        return { continued: true, scanned: persistedCursor, total: messageTotal }
+      }
+
+      if (globalCursor >= actualCount) {
+        const profileRes = await gmail.users.getProfile({ userId: 'me' })
+        clearInterval(cancelPoll)
+        const stats = await finalizeScan(admin, userId, profileRes.data.historyId ?? null)
+        return { ...stats, continued: false }
+      }
+
+      // Transient read gap — retry on next chunk with corrected total.
+      messageTotal = actualCount
       await saveScanProgress(admin, userId, {
-        status: 'scanning',
-        phase: 'Rebuilding email list...',
-        scanned: 0,
-        cursor: 0,
-        total: 0,
-        list_page_token: null,
-        list_complete: false,
+        total: messageTotal,
+        scanned: persistedCursor,
+        cursor: persistedCursor,
+        phase: `Reading ${persistedCursor.toLocaleString()} / ${messageTotal.toLocaleString()} emails · retrying`,
       })
       clearInterval(cancelPoll)
-      return { continued: true, scanned: 0, total: 0 }
+      return { continued: true, scanned: persistedCursor, total: messageTotal }
     }
 
     const startedAt = Date.now()
@@ -427,10 +463,16 @@ export async function runScanChunk(
       startIndex: 0,
       deadline,
       onRateLimited: async () => {
-        await onProgress(globalCursor, messageTotal, 'Gmail rate limit — waiting a moment...')
+        await onProgress(
+          globalCursor,
+          messageTotal,
+          'Gmail rate limit — waiting a moment...',
+          { persistCursor: globalCursor }
+        )
       },
       onProgress: async (scannedInSlice) => {
         const globalScanned = globalCursor + scannedInSlice
+        persistedCursor = globalScanned
         const elapsed = Date.now() - startedAt
         const processed = globalScanned - globalCursor
         const rate = processed / Math.max(elapsed, 1)
@@ -444,12 +486,14 @@ export async function runScanChunk(
         await onProgress(
           globalScanned,
           messageTotal,
-          `Reading ${globalScanned.toLocaleString()} / ${messageTotal.toLocaleString()} emails${etaText}`
+          `Reading ${globalScanned.toLocaleString()} / ${messageTotal.toLocaleString()} emails${etaText}`,
+          { persistCursor: globalScanned }
         )
       },
     })
 
     globalCursor += sliceCursor
+    persistedCursor = globalCursor
     await upsertSendersList(admin, userId, chunkSenders)
     if (chunkSenders.length > 0) {
       await classify(chunkSenders, userId, admin)
@@ -489,11 +533,12 @@ export async function runScanChunk(
         phase: partial.senderCount > 0
           ? `Stopped — ${partial.senderCount.toLocaleString()} senders saved and ready to review`
           : 'Scan cancelled',
-        cursor: globalCursor,
+        scanned: persistedCursor,
+        cursor: persistedCursor,
         completed_at: new Date().toISOString(),
         chunk_locked_at: null,
       })
-      return { cancelled: true, scanned: globalCursor, ...partial }
+      return { cancelled: true, scanned: persistedCursor, ...partial }
     }
 
     // Both cases need the user to sign in again — never auto-retry these, or a
@@ -503,7 +548,8 @@ export async function runScanChunk(
       await saveScanProgress(admin, userId, {
         status: 'error',
         phase: 'Gmail access expired',
-        cursor: globalCursor,
+        scanned: persistedCursor,
+        cursor: persistedCursor,
         chunk_locked_at: null,
       })
       return { error: 'gmail_auth_expired', continued: false }
@@ -516,13 +562,14 @@ export async function runScanChunk(
       phase: partial.senderCount > 0
         ? `${message} — ${partial.senderCount.toLocaleString()} senders saved, will resume automatically`
         : `${message} — will resume automatically`,
-      cursor: globalCursor,
+      scanned: persistedCursor,
+      cursor: persistedCursor,
       chunk_locked_at: null,
     })
     return {
       error: message,
       continued: true,
-      scanned: globalCursor,
+      scanned: persistedCursor,
       ...partial,
     }
   } finally {
