@@ -4,7 +4,7 @@ import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { getRefreshToken } from '@/lib/gmail/getRefreshToken'
 import { GmailNotConnectedError } from '@/lib/gmail/getRefreshTokenForUser'
 import { getGmailClient } from '@/lib/gmail/client'
-import { getMessageIdsForSenders } from '@/lib/gmail/getMessageIds'
+import { processSendersInterleaved } from '@/lib/gmail/processSenders'
 import { trashMessages } from '@/lib/gmail/bulkActions'
 import { unsubscribeSender } from '@/lib/gmail/unsubscribe'
 import { isGoogleTokenExpiry } from '@/lib/gmail/handleTokenExpiry'
@@ -15,6 +15,10 @@ import type { UserSender } from '@/types'
 // Unsubscribing + deleting across many senders can run for minutes â€” match
 // the scan routes' budget.
 export const maxDuration = 300
+
+/** Stop collecting+deleting new senders this far in, leaving headroom under
+ * maxDuration for the final DB writes (see /api/actions for rationale). */
+const ACTION_TIME_BUDGET_MS = 240_000
 
 /** .in() values travel in the URL â€” keep each request comfortably small. */
 const IN_CHUNK = 200
@@ -128,66 +132,52 @@ export async function POST(req: Request) {
 
     let totalSucceeded = 0
     let totalFailed = 0
+    let deletedSenders: string[] = senderEmails
+    let timedOut = false
 
     // â”€â”€ Phase 2: Delete emails (skipped for Unsubscribe Only) â”€â”€â”€â”€
     if (deleteAfter) {
       for (const email of senderEmails) statuses[email] = 'queued'
 
+      // Seed the email-progress denominator from known counts so Phase 2 shows
+      // movement immediately rather than "Collecting message IDs..." across
+      // thousands of senders.
+      let estimatedTotal = 0
+      for (const email of senderEmails) estimatedTotal += senderMap.get(email)?.email_count ?? 0
+
       await admin.from('scan_jobs').update({
         phase: 'Deleting emails...',
+        total: estimatedTotal,
         sender_statuses: statuses,
         unsubscribe_statuses: unsubscribeResults,
       }).eq('user_id', user.id)
 
-      const onSenderStart = async (email: string) => {
-        statuses[email] = 'in_progress'
-        await admin.from('scan_jobs').update({
-          sender_statuses: statuses,
-          phase: `Collecting IDs from ${email}...`,
-        }).eq('user_id', user.id)
-      }
-
-      const { allIds, perSender } = await getMessageIdsForSenders(gmail, senderEmails, onSenderStart)
-
-      await admin.from('scan_jobs').update({
-        total: allIds.length,
-        phase: 'Deleting emails...',
-        sender_statuses: statuses,
-      }).eq('user_id', user.id)
-
-      let lastDbUpdate = 0
-
-      for (const { email, ids } of perSender) {
-        statuses[email] = 'in_progress'
-        await admin.from('scan_jobs').update({
-          sender_statuses: statuses,
-          phase: `Deleting from ${email}...`,
-        }).eq('user_id', user.id)
-
-        if (ids.length === 0) {
+      const result = await processSendersInterleaved(gmail, senderEmails, {
+        deadline: Date.now() + ACTION_TIME_BUDGET_MS,
+        action: trashMessages,
+        onSenderStart: async email => {
+          statuses[email] = 'in_progress'
+          await admin.from('scan_jobs').update({
+            sender_statuses: statuses,
+            phase: `Deleting from ${email}...`,
+          }).eq('user_id', user.id)
+        },
+        onSenderDone: async (email, globalProcessed) => {
           statuses[email] = 'done'
-          await admin.from('scan_jobs').update({ sender_statuses: statuses }).eq('user_id', user.id)
-          continue
-        }
+          await admin.from('scan_jobs').update({
+            sender_statuses: statuses,
+            processed: globalProcessed,
+          }).eq('user_id', user.id)
+        },
+        onProgress: async globalProcessed => {
+          await admin.from('scan_jobs').update({ processed: globalProcessed }).eq('user_id', user.id)
+        },
+      })
 
-        const onProgress = async (processed: number) => {
-          const globalProcessed = totalSucceeded + totalFailed + processed
-          if (globalProcessed - lastDbUpdate >= 500 || processed >= ids.length) {
-            lastDbUpdate = globalProcessed
-            await admin.from('scan_jobs').update({ processed: globalProcessed }).eq('user_id', user.id)
-          }
-        }
-
-        const result = await trashMessages(gmail, ids, onProgress)
-        totalSucceeded += result.succeeded
-        totalFailed += result.failed
-
-        statuses[email] = 'done'
-        await admin.from('scan_jobs').update({
-          sender_statuses: statuses,
-          processed: totalSucceeded + totalFailed,
-        }).eq('user_id', user.id)
-      }
+      totalSucceeded = result.totalSucceeded
+      totalFailed = result.totalFailed
+      deletedSenders = result.processedSenders
+      timedOut = result.timedOut
     }
 
     // â”€â”€ Post-action DB updates (chunked â€” .in() is URL-bound) â”€â”€â”€â”€
@@ -199,9 +189,9 @@ export async function POST(req: Request) {
         .in('sender_email', emails)
     }
 
-    // Only zero email counts when emails were actually deleted
+    // Only zero email counts for senders we actually deleted from
     if (deleteAfter) {
-      for (const emails of chunk(senderEmails, IN_CHUNK)) {
+      for (const emails of chunk(deletedSenders, IN_CHUNK)) {
         await admin.from('user_senders')
           .update({ email_count: 0, unread_count: 0 })
           .eq('user_id', user.id)
@@ -211,7 +201,7 @@ export async function POST(req: Request) {
 
     await admin.from('scan_jobs').update({
       status: 'complete',
-      phase: 'Done',
+      phase: timedOut ? 'Stopped early — run again to finish the rest' : 'Done',
       processed: totalSucceeded + totalFailed,
       completed_at: new Date().toISOString(),
     }).eq('user_id', user.id)

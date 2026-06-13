@@ -25,7 +25,7 @@ async function withConcurrencyLimit<T>(
   return results
 }
 
-async function getMessageIdsForSender(
+export async function getMessageIdsForSender(
   gmail: gmail_v1.Gmail,
   senderEmail: string
 ): Promise<string[]> {
