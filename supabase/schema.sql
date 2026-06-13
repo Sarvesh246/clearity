@@ -19,9 +19,16 @@ CREATE TABLE public.sender_classifications (
   confidence FLOAT,
   method TEXT CHECK (method IN ('ai', 'rule_based')),
   reason TEXT,
+  -- Algorithm version that produced this row. classify() only reuses a cached
+  -- row when classifier_version >= the app's current CLASSIFIER_VERSION, so
+  -- classifier improvements recompute stale entries automatically on next scan.
+  classifier_version INTEGER DEFAULT 0,
   classified_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- Migration for existing deployments (safe to re-run):
+ALTER TABLE public.sender_classifications
+  ADD COLUMN IF NOT EXISTS classifier_version INTEGER DEFAULT 0;
 
 -- per-user sender scan results
 CREATE TABLE public.user_senders (

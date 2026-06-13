@@ -1,188 +1,158 @@
 import { Classification, ClassificationResult } from '@/types/index'
+import { extractFeatures, type SenderSignals } from './features'
 
-const SAFE_DOMAINS = new Set([
-  // Banks & financial
-  'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citibank.com',
-  'capitalone.com', 'discover.com', 'americanexpress.com', 'paypal.com',
-  'venmo.com', 'stripe.com', 'fidelity.com', 'schwab.com', 'robinhood.com',
-  'ally.com', 'sofi.com', 'coinbase.com', 'vanguard.com', 'tdameritrade.com',
-  'etrade.com', 'wealthfront.com', 'betterment.com', 'acorns.com',
-  // Healthcare
-  'mychart.com', 'epic.com', 'cvs.com', 'walgreens.com', 'optum.com',
-  'aetna.com', 'cigna.com', 'uhc.com', 'anthem.com', 'bcbs.com',
-  // Shipping / receipts
-  'ups.com', 'fedex.com', 'usps.com', 'dhl.com',
-  // Major e-commerce receipts (transactional, not marketing)
-  'amazon.com', 'ebay.com', 'etsy.com',
-  // Cloud / dev tools
-  'github.com', 'gitlab.com', 'vercel.com', 'supabase.com', 'supabase.io',
-  'google.com', 'apple.com', 'microsoft.com', 'zoom.us', 'twilio.com',
-  'sendgrid.com', 'netlify.com', 'cloudflare.com', 'digitalocean.com',
-  'heroku.com', 'aws.amazon.com', 'azure.com', 'firebase.google.com',
-  // Utilities / telecom
-  'att.com', 'verizon.com', 'tmobile.com', 'comcast.com', 'spectrum.com',
-])
+// Rule-based fallback classifier. Runs when Gemini is unavailable / over quota.
+//
+// Design: instead of a single junk score with a low bar, we accumulate
+// *separate* junk and safe evidence and compare them. This lets a strong safe
+// signal (transactional category, regularly-read mail, a real person) cancel a
+// junk signal and vice-versa, which is what keeps notifications you want
+// (Garmin, bank alerts) out of junk and unsolicited orgs out of safe.
 
-const SAFE_TLDS = new Set(['.edu', '.gov', '.mil'])
+export function classifyByRules(sender: SenderSignals): ClassificationResult {
+  const f = extractFeatures(sender)
+  const { domain } = sender
 
-const JUNK_DOMAINS = new Set([
-  // Social
-  'linkedin.com', 'facebookmail.com', 'notifications.twitter.com',
-  'tiktok.com', 'instagram.com', 'snapchat.com', 'discord.com', 'reddit.com',
-  'pinterest.com', 'tumblr.com', 'mastodon.social', 'threads.net',
-  'bsky.social', 'x.com',
-  // Streaming
-  'netflix.com', 'hulu.com', 'spotify.com', 'disneyplus.com', 'hbomax.com',
-  'max.com', 'primevideo.com', 'appletv.com', 'peacocktv.com', 'paramountplus.com',
-  'crunchyroll.com', 'funimation.com', 'pandora.com', 'tidal.com', 'deezer.com',
-  // Food & delivery
-  'doordash.com', 'ubereats.com', 'grubhub.com', 'instacart.com',
-  'postmates.com', 'seamless.com', 'caviar.com', 'gopuff.com',
-  // Retail marketing
-  'target.com', 'walmart.com', 'bestbuy.com', 'homedepot.com', 'lowes.com',
-  'macys.com', 'nordstrom.com', 'kohls.com', 'gap.com', 'oldnavy.com',
-  'hm.com', 'zara.com', 'nike.com', 'adidas.com', 'uniqlo.com', 'asos.com',
-  'shein.com', 'wayfair.com', 'chewy.com', 'costco.com', 'samsclub.com',
-  'tjmaxx.com', 'marshalls.com', 'ross.com', 'burlington.com', 'jcpenney.com',
-  'sears.com', 'crateandbarrel.com', 'westelm.com', 'potterybarn.com',
-  'anthropologie.com', 'urbanoutfitters.com', 'freepeople.com',
-  'forever21.com', 'primark.com', 'reebok.com', 'underarmour.com',
-  'puma.com', 'newbalance.com', 'vans.com', 'converse.com', 'timberland.com',
-  'levi.com', 'calvinklein.com', 'ralphlauren.com', 'tommyhilfiger.com',
-  'coach.com', 'katespade.com', 'michaelkors.com', 'gucci.com', 'louisvuitton.com',
-  // Travel
-  'expedia.com', 'kayak.com', 'booking.com', 'hotels.com', 'airbnb.com',
-  'tripadvisor.com', 'united.com', 'delta.com', 'southwest.com', 'aa.com',
-  'jetblue.com', 'hilton.com', 'marriott.com', 'hyatt.com', 'ihg.com',
-  'wyndham.com', 'bestwestern.com', 'travelocity.com', 'orbitz.com',
-  'priceline.com', 'hotwire.com', 'vrbo.com', 'hostelworld.com',
-  'carnival.com', 'royalcaribbean.com', 'ncl.com', 'princess.com',
-  'alaskaair.com', 'spirit.com', 'frontier.com', 'allegiantair.com',
-  // ESP / marketing platforms
-  'mailchimp.com', 'constantcontact.com', 'hubspot.com', 'salesforce.com',
-  'marketo.com', 'klaviyo.com', 'sendgrid.net', 'mailgun.com',
-  'campaignmonitor.com', 'activecampaign.com', 'drip.com', 'omnisend.com',
-  'sendinblue.com', 'brevo.com', 'mailerlite.com', 'convertkit.com',
-  'aweber.com', 'getresponse.com', 'icontact.com', 'freshmarketer.com',
-  // News / media / content
-  'substack.com', 'medium.com', 'quora.com', 'producthunt.com',
-  'buzzfeed.com', 'vox.com', 'huffpost.com', 'businessinsider.com',
-  'theguardian.com', 'nytimes.com', 'washingtonpost.com', 'wsj.com',
-  'forbes.com', 'fortune.com', 'inc.com', 'entrepreneur.com',
-  'fastcompany.com', 'wired.com', 'techcrunch.com', 'theverge.com',
-  'engadget.com', 'cnet.com', 'zdnet.com', 'ycombinator.com',
-  'hackernews.com', 'slashdot.org',
-  // Gaming
-  'ea.com', 'steampowered.com', 'epicgames.com', 'xbox.com',
-  'playstation.com', 'roblox.com', 'twitch.tv', 'battlenet.com',
-  'ubisoft.com', 'activision.com', 'blizzard.com', 'nintendo.com',
-  'ign.com', 'gamespot.com', 'polygon.com',
-  // Misc marketing / deals / coupons
-  'groupon.com', 'yelp.com', 'meetup.com', 'eventbrite.com',
-  'duolingo.com', 'udemy.com', 'coursera.com', 'skillshare.com',
-  'masterclass.com', 'brilliant.org', 'khan.academy.org',
-  'retailmenot.com', 'honey.com', 'rakuten.com', 'swagbucks.com',
-  'bankoffers.com', 'dosh.com',
-  // Crypto / fintech marketing
-  'binance.com', 'kraken.com', 'crypto.com', 'blockfi.com',
-])
+  // --- Tier 1: high-confidence hard rules ---------------------------------
 
-const JUNK_NAME_PATTERN = /newsletter|noreply|no-reply|notifications?|updates?|alerts?|marketing|promo|info|support|hello|hi\b|news|digest|weekly|daily|team|donotreply|do-not-reply/i
-
-const JUNK_DOMAIN_PREFIX_PATTERN = /^(mail|email|news|newsletter|marketing|notify|alerts?|noreply|no-reply|updates?|promo|info|notifications?)\./i
-
-const PERSONAL_NAME_PATTERN = /^[A-Z][a-z]+ [A-Z][a-z]+$/
-
-const JUNK_GMAIL_LABELS = new Set([
-  'CATEGORY_PROMOTIONS',
-  'CATEGORY_SOCIAL',
-  'CATEGORY_FORUMS',
-  'CATEGORY_UPDATES',
-])
-
-interface SenderInput {
-  domain: string
-  sender_name: string | null
-  has_unsubscribe_header: boolean
-  gmail_labels: string[]
-  email_count: number
-}
-
-export function classifyByRules(sender: SenderInput): ClassificationResult {
-  const { domain, sender_name, has_unsubscribe_header, gmail_labels, email_count } = sender
-
-  // Tier 1: definite safe — explicit domain list
-  if (SAFE_DOMAINS.has(domain)) {
-    return result(domain, 'safe', 0.95, 'rule_based', 'Known safe domain (financial, shipping, or dev tool)')
+  // Government / military almost never market.
+  if (f.isGovMil) {
+    return result(domain, 'safe', 0.95, 'Government or military sender')
   }
 
-  // Tier 1: definite safe — TLD
-  const tld = domain.match(/(\.[a-z]{2,})$/)?.[1]
-  if (tld && SAFE_TLDS.has(tld)) {
-    return result(domain, 'safe', 0.95, 'rule_based', `Trusted TLD (${tld})`)
+  // Curated safe domains (banks, healthcare, shipping, dev/account/security,
+  // device & service notifications). Matched on the registrable domain so
+  // marketing/notification subdomains resolve correctly.
+  if (f.inSafeList && f.category !== 'promotions') {
+    return result(domain, 'safe', 0.93, 'Known account, transactional, or device-notification sender')
   }
 
-  // Tier 2: definite junk — explicit domain list
-  if (JUNK_DOMAINS.has(domain)) {
-    return result(domain, 'junk', 0.9, 'rule_based', 'Known marketing or social domain')
+  // Curated marketing/social/newsletter domains — but let an unusually strong
+  // safe signal (transactional category, or mail the user clearly reads) pull
+  // it back to "unsure" rather than force-junking, e.g. a real receipt from a
+  // streaming service.
+  if (f.inJunkList) {
+    const strongSafe = f.category === 'updates' || f.category === 'personal' ||
+      (f.readRatio !== null && f.readRatio <= 0.2)
+    if (!strongSafe) {
+      return result(domain, 'junk', 0.9, 'Known marketing, social, or newsletter sender')
+    }
   }
 
-  // Tier 3: signal scoring
-  let score = 0
+  // A real person from a personal mailbox.
+  if (f.isFreemailPersonal) {
+    return result(domain, 'safe', 0.85, 'Appears to be a personal contact')
+  }
+
+  // --- Tier 2: weighted evidence ------------------------------------------
+
+  let junk = 0
+  let safe = 0
   const reasons: string[] = []
 
-  if (has_unsubscribe_header) {
-    score += 3
-    reasons.push('has unsubscribe header')
+  switch (f.category) {
+    case 'promotions':
+      junk += 3
+      reasons.push('Gmail marked as Promotions')
+      break
+    case 'social':
+      junk += 2
+      reasons.push('Gmail marked as Social')
+      break
+    case 'forums':
+      junk += 2
+      reasons.push('Gmail marked as Forums / mailing list')
+      break
+    case 'updates':
+      safe += 2
+      reasons.push('Gmail marked as Updates (transactional/notifications)')
+      break
+    case 'personal':
+      safe += 3
+      reasons.push('Gmail marked as Personal')
+      break
   }
 
-  const hasJunkLabel = gmail_labels.some(l => JUNK_GMAIL_LABELS.has(l))
-  if (hasJunkLabel) {
-    score += 3
-    reasons.push('Gmail categorized as promotions/social/forums/updates')
+  if (f.marketingLocalPart) {
+    junk += 2
+    reasons.push('sender address looks promotional (e.g. deals@, newsletter@)')
   }
-
-  if (email_count > 50) {
-    score += 4
-    reasons.push('very high email volume (>50)')
-  } else if (email_count > 20) {
-    score += 2
-    reasons.push('high email volume (>20)')
+  if (f.transactionalLocalPart) {
+    safe += 2
+    reasons.push('sender address looks transactional (e.g. alerts@, receipts@)')
   }
-
-  if (sender_name && JUNK_NAME_PATTERN.test(sender_name)) {
-    score += 1
-    reasons.push('sender name suggests automated sender')
+  if (f.marketingName) {
+    junk += 1
+    reasons.push('sender name suggests marketing')
   }
-
-  if (JUNK_DOMAIN_PREFIX_PATTERN.test(domain)) {
-    score += 1
-    reasons.push('domain prefix suggests mailing system')
-  }
-
-  if (sender_name && PERSONAL_NAME_PATTERN.test(sender_name)) {
-    score -= 2
+  if (f.personalName) {
+    safe += 2
     reasons.push('sender name looks like a real person')
   }
 
-  if (score >= 3) {
-    const confidence = Math.min(0.5 + score * 0.05, 0.85)
-    return result(domain, 'junk', confidence, 'rule_based', reasons.join('; ') || 'Signal-based junk classification')
+  // Engagement: how much of this sender's mail does the user actually open?
+  if (f.readRatio !== null) {
+    if (f.readRatio >= 0.9) {
+      junk += 2
+      reasons.push('almost never opened')
+    } else if (f.readRatio <= 0.25) {
+      safe += 3
+      reasons.push('regularly opened')
+    }
   }
 
-  if (score <= -2) {
-    return result(domain, 'safe', 0.7, 'rule_based', reasons.join('; ') || 'Signal-based safe classification')
+  // Sheer volume is a weak junk hint on its own (a service you use can be
+  // chatty too), so it's kept small and only counts above a high bar.
+  if (f.emailCount > 80) {
+    junk += 1
+    reasons.push('very high email volume')
   }
 
-  return result(domain, 'unsure', 0.5, 'rule_based', reasons.length ? reasons.join('; ') : 'No strong signals')
+  // The unsubscribe header is a *reinforcing* signal only — transactional
+  // senders (Garmin, banks, shipping) carry it too, so it must not junk on its
+  // own. It adds weight only when other marketing signals already point to junk.
+  if (sender.has_unsubscribe_header && (f.category === 'promotions' || f.marketingLocalPart || f.marketingName)) {
+    junk += 1
+    reasons.push('has an unsubscribe link')
+  }
+  // Conversely, a sender with no unsubscribe header that Gmail didn't flag as
+  // promotional is usually transactional/personal.
+  if (!sender.has_unsubscribe_header && f.category !== 'promotions' && f.category !== 'social') {
+    safe += 1
+    reasons.push('no marketing unsubscribe link')
+  }
+
+  // Academic is a weak safe hint, fully overridable by the marketing evidence
+  // above — fixes unsolicited .edu recruitment being force-classified safe.
+  if (f.isAcademic) {
+    safe += 1
+    reasons.push('academic (.edu) sender')
+  }
+
+  // --- Decide --------------------------------------------------------------
+
+  const margin = junk - safe
+  if (margin >= 3) {
+    return result(domain, 'junk', clampConfidence(0.55 + margin * 0.05), reasons.join('; '))
+  }
+  if (margin <= -3) {
+    return result(domain, 'safe', clampConfidence(0.55 + -margin * 0.05), reasons.join('; '))
+  }
+
+  // Genuinely ambiguous — route to "unsure" rather than defaulting to junk, so
+  // mail the user might want to keep is never silently bucketed for deletion.
+  return result(domain, 'unsure', 0.5, reasons.length ? reasons.join('; ') : 'No strong signals')
+}
+
+function clampConfidence(c: number): number {
+  return Math.min(Math.max(c, 0.5), 0.85)
 }
 
 function result(
   domain: string,
   classification: Classification,
   confidence: number,
-  method: 'rule_based',
   reason: string
 ): ClassificationResult {
-  return { domain, classification, confidence, method, reason }
+  return { domain, classification, confidence, method: 'rule_based', reason }
 }
