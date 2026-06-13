@@ -3,6 +3,7 @@ import { SenderData } from '@/lib/gmail/scanner'
 import { ClassificationResult, QuotaExceededError } from '@/types/index'
 import { classifyWithGemini } from './geminiClassifier'
 import { classifyByRules } from './ruleBasedClassifier'
+import { CLASSIFIER_VERSION } from './features'
 
 export async function classify(
   senders: SenderData[],
@@ -30,7 +31,8 @@ export async function classify(
   for (let i = 0; i < allDomains.length; i += IN_CHUNK) {
     const { data: cached, error } = await adminClient
       .from('sender_classifications')
-      .select('domain,classification,confidence,method,reason')
+      .select('domain,classification,confidence,method,reason,classifier_version')
+      .gte('classifier_version', CLASSIFIER_VERSION)
       .in('domain', allDomains.slice(i, i + IN_CHUNK))
     if (error) throw new Error(error.message)
     for (const row of cached ?? []) {
@@ -73,6 +75,7 @@ export async function classify(
       confidence: r.confidence,
       method: r.method,
       reason: r.reason,
+      classifier_version: CLASSIFIER_VERSION,
       classified_at: now,
       updated_at: now,
     }))
