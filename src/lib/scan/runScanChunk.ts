@@ -1,7 +1,7 @@
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { getGmailClient } from '@/lib/gmail/client'
 import { listMessageIdsChunk } from '@/lib/gmail/listMessages'
-import { CHUNK_TIME_BUDGET_MS, scanMessageIds, type SenderData } from '@/lib/gmail/scanner'
+import { AdaptiveThrottle as ScanThrottle, CHUNK_TIME_BUDGET_MS, scanMessageIds, type SenderData } from '@/lib/gmail/scanner'
 import { incrementalSync } from '@/lib/gmail/incrementalScan'
 import { classify } from '@/lib/classification/classify'
 import { isGoogleTokenExpiry } from '@/lib/gmail/handleTokenExpiry'
@@ -152,6 +152,22 @@ export async function runScanChunk(
 
   const runStartedAt = new Date().toISOString()
   let cancelPoll: ReturnType<typeof setInterval> | undefined
+  /**
+   * Set when the cancel-poll detects a NEWER run has taken over this user's
+   * scan_jobs row (its started_at advanced past ours). A superseded run must
+   * abandon quietly: it must NOT write cancelled/error status or release the
+   * lock, or it would clobber the active run that just started (the stop→start
+   * race). Distinct from a plain user cancel, where we DO write terminal state.
+   */
+  let supersededByNewerRun = false
+  /**
+   * True once this run has claimed the row by writing started_at = runStartedAt.
+   * Gates the ownership-guarded lock release: a claimed run releases only if it
+   * still owns the row; an unclaimed run (early `skipped` return) releases
+   * unconditionally — it holds the lock exclusively and must free it, not leak
+   * it for the 6-min stale window.
+   */
+  let ownsRow = false
   let globalCursor = 0
   /** Latest checkpoint written to DB — survives mid-chunk aborts / rate-limit waits. */
   let persistedCursor = 0
@@ -201,6 +217,7 @@ export async function runScanChunk(
         updated_at: runStartedAt,
       })
       if (incErr) throw new Error(`Failed to start sync: ${incErr.message}`)
+      ownsRow = true
     } else if (canResume) {
       const listComplete = existingJob?.list_complete ?? false
       const resumeUpdate = admin
@@ -226,6 +243,7 @@ export async function runScanChunk(
       if (!resumed) {
         return { skipped: true }
       }
+      ownsRow = true
     } else {
       if (!forceFull && hasIncompleteScan(existingJob)) {
         return { skipped: true }
@@ -248,6 +266,7 @@ export async function runScanChunk(
         updated_at: runStartedAt,
       })
       if (startErr) throw new Error(`Failed to start scan: ${startErr.message}`)
+      ownsRow = true
       globalCursor = 0
       persistedCursor = 0
       inFlightScanned = 0
@@ -272,6 +291,7 @@ export async function runScanChunk(
       // mismatch means this invocation is no longer the active one.
       const startedMs = data.started_at ? new Date(data.started_at).getTime() : 0
       if (data.status === 'cancelled' || startedMs !== runStartedMs) {
+        if (startedMs !== runStartedMs) supersededByNewerRun = true
         ac.abort()
         clearInterval(cancelPoll)
       }
@@ -492,6 +512,10 @@ export async function runScanChunk(
     const CHECKPOINT_EVERY = 500
     const touchedEmails = new Set<string>()
     let quotaPaused = false
+    // One throttle for the whole chunk: its learned rate and any active backoff
+    // must persist across sub-slices, or each 500-message sub-slice would reset
+    // to START_RPS and re-trip Gmail's limit right after backing off.
+    const throttle = new ScanThrottle()
 
     const reportReadProgress = async (globalScanned: number) => {
       inFlightScanned = globalScanned
@@ -523,6 +547,7 @@ export async function runScanChunk(
         signal: ac.signal,
         startIndex: 0,
         deadline,
+        throttle,
         onRateLimited: async () => {
           await onProgress(
             inFlightScanned,
@@ -568,6 +593,10 @@ export async function runScanChunk(
 
     if (ac.signal.aborted) {
       clearInterval(cancelPoll)
+      if (supersededByNewerRun) {
+        // A newer run owns the row now — leave its status, cursor, and lock alone.
+        return { cancelled: true, scanned: globalCursor }
+      }
       const partial = await finalizePartialScan(admin, userId)
       await saveScanProgress(admin, userId, {
         status: 'cancelled',
@@ -628,6 +657,12 @@ export async function runScanChunk(
   } catch (err) {
     clearInterval(cancelPoll)
 
+    // A newer run has taken over this user's scan_jobs row; abandon quietly so a
+    // dead run's error/cancel state can't overwrite the active run's progress.
+    if (supersededByNewerRun) {
+      return { cancelled: true, scanned: persistedCursor }
+    }
+
     if (err instanceof ScanCancelledError) {
       const partial = await finalizePartialScan(admin, userId)
       await saveScanProgress(admin, userId, {
@@ -676,7 +711,11 @@ export async function runScanChunk(
     }
   } finally {
     if (!skipLock) {
-      await releaseChunkLock(admin, userId)
+      // If we claimed the row, release only while we still own it (started_at
+      // unchanged) so a newer run that took over keeps its lock. If we never
+      // claimed it (early skip), release unconditionally — we hold the lock
+      // exclusively and must free it rather than leak it for 6 minutes.
+      await releaseChunkLock(admin, userId, ownsRow ? runStartedAt : undefined)
     }
   }
 }

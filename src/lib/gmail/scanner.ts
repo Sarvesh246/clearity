@@ -34,6 +34,14 @@ export interface ScanMessageIdsOptions {
   /** Stop before this timestamp (for Vercel time limits). */
   deadline?: number
   startIndex?: number
+  /**
+   * Reuse a throttle across calls so its learned rate (and any active backoff)
+   * survives between the small sub-slices a single chunk reads. Without this,
+   * every 500-message sub-slice spins up a fresh throttle at START_RPS, throwing
+   * away the backoff just learned from a 429 and immediately re-tripping the
+   * limit. Defaults to a fresh throttle for one-shot callers.
+   */
+  throttle?: AdaptiveThrottle
 }
 
 /**
@@ -84,7 +92,7 @@ export class GmailQuotaPauseError extends Error {
  * Adaptive token-rate controller. Stays just below Gmail's per-user limit:
  * backs off hard on 429/rate signals, then gently ramps back up.
  */
-class AdaptiveThrottle {
+export class AdaptiveThrottle {
   rps = START_RPS
   private streak = 0
 
@@ -327,12 +335,12 @@ export async function scanMessageIds(
     onRateLimited,
     deadline = Number.POSITIVE_INFINITY,
     startIndex = 0,
+    throttle = new AdaptiveThrottle(),
   } = options
 
   const total = ids.length
   let cursor = startIndex
   const chunkEmails = new Set<string>()
-  const throttle = new AdaptiveThrottle()
   let pausedForQuota = false
 
   let lastReported = startIndex

@@ -44,15 +44,27 @@ export async function tryAcquireChunkLock(
   return !!data
 }
 
+/**
+ * Release the lock. Pass `ownedStartedAt` (the run's own `started_at`) to make
+ * the release conditional: if a newer run has since taken over the row — it
+ * overwrote `started_at` with its own — this becomes a no-op so a dead/aborting
+ * run can never null the lock the active run is holding. Omitting the guard
+ * releases unconditionally (legacy behaviour).
+ */
 export async function releaseChunkLock(
   admin: SupabaseClient,
-  userId: string
+  userId: string,
+  ownedStartedAt?: string
 ): Promise<void> {
-  await admin
+  let query = admin
     .from('scan_jobs')
     .update({
       chunk_locked_at: null,
       updated_at: new Date().toISOString(),
     })
     .eq('user_id', userId)
+
+  if (ownedStartedAt) query = query.eq('started_at', ownedStartedAt)
+
+  await query
 }
