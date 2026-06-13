@@ -186,11 +186,21 @@ export default function SenderList({ senders }: SenderListProps) {
     if (last) void postAction(last.url, last.body)
   }
 
+  // "Cleaned" = already unsubscribed OR emptied. Hidden by default so the junk
+  // and other category tabs only surface senders still worth acting on; the
+  // "Show cleaned" toggle brings them back.
+  const isCleaned = (s: UserSender) => s.is_unsubscribed || s.email_count === 0
+
+  const actionableSenders = useMemo(
+    () => (hideZeroEmail ? localSenders.filter(s => !isCleaned(s)) : localSenders),
+    [localSenders, hideZeroEmail]
+  )
+
   const visibleSenders = useMemo(() => {
-    let list = activeFilter === 'all' ? localSenders : localSenders.filter(s => s.classification === activeFilter)
-    if (hideZeroEmail) list = list.filter(s => s.email_count > 0)
-    return list
-  }, [localSenders, activeFilter, hideZeroEmail])
+    return activeFilter === 'all'
+      ? actionableSenders
+      : actionableSenders.filter(s => s.classification === activeFilter)
+  }, [actionableSenders, activeFilter])
 
   const visibleEmails = useMemo(
     () => visibleSenders.map(s => s.sender_email),
@@ -220,12 +230,14 @@ export default function SenderList({ senders }: SenderListProps) {
       .length
   }, [localSenders, selectedSenders])
 
+  // Tab counts track the same cleaned filter as the list so the number on each
+  // tab matches the rows shown under it.
   const counts = useMemo(() => ({
-    all: localSenders.length,
-    junk: localSenders.filter(s => s.classification === 'junk').length,
-    unsure: localSenders.filter(s => s.classification === 'unsure').length,
-    safe: localSenders.filter(s => s.classification === 'safe').length,
-  }), [localSenders])
+    all: actionableSenders.length,
+    junk: actionableSenders.filter(s => s.classification === 'junk').length,
+    unsure: actionableSenders.filter(s => s.classification === 'unsure').length,
+    safe: actionableSenders.filter(s => s.classification === 'safe').length,
+  }), [actionableSenders])
 
   function handleAction(actionType: 'trash' | 'mark_read' | 'archive') {
     const selected = localSenders.filter(s => selectedSenders.has(s.sender_email))

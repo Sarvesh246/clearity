@@ -1,6 +1,6 @@
 # Clearity — Inbox Recovery Tool
 
-## Status: Stage 12 Complete — Production hardened (full-debug pass June 2026)
+## Status: Stage 14 Complete — Bulk-action scaling + unsubscribe reliability (June 2026)
 
 ## Stack
 - Next.js 16 App Router, TypeScript, Tailwind v4
@@ -198,6 +198,13 @@ Root cause of "scan progress resets to 0 on quota": the resume cursor was only c
 ### Stage 12 known limitations
 - A bulk action over very many emails (≫100k) can exceed the 300s budget; the killed run leaves `scan_jobs` stuck `scanning` until the next scan/action overwrites it (chunk lock self-heals via 6-min staleness; the modal must be dismissed manually).
 - Running a bulk action while a *partial/errored* scan is parked clobbers the scan's resume position (total/scanned reset) — senders/data are kept, but "Continue Scan" disappears; use Sync New Emails or a fresh scan after.
+
+## Stage 14 — Bulk-action scaling + unsubscribe reliability (June 2026)
+
+### Fixed
+- **Phase 2 stuck at 0% on large selections** (`/api/actions`, `/api/unsubscribe` Phase 2): both routes collected message IDs for EVERY selected sender up front (`getMessageIdsForSenders`) before acting. For thousands of senders the "senders processed" bar sat frozen at 0% (senders were only marked `done` in the later action loop), the in-progress count ballooned past the real concurrency ("+N more in parallel"), and on big inboxes the single invocation blew past `maxDuration=300` and was hard-killed with the job stuck `scanning` and ZERO work saved. Now `processSendersInterleaved` (`src/lib/gmail/processSenders.ts`) collects + acts ONE sender at a time at modest concurrency: progress advances continuously, each finished sender's emails are durably trashed, and a 240s time budget (`ACTION_TIME_BUDGET_MS`) stops cleanly with partial results saved (`status='complete'`, phase "Stopped early — run again to finish the rest") instead of being killed. Email-progress denominator is seeded from known `email_count` sums so it shows movement immediately instead of "Collecting message IDs..." forever. Count zeroing only touches senders actually processed.
+- **Unsubscribe emails bouncing** (`src/lib/gmail/unsubscribe.ts`, `buildUnsubscribeEmail.ts`): (1) `unsubscribeSender` preferred mailto over the HTTP URL — it sent a fire-and-forget email (which bounces silently minutes later → "message not delivered") even when a verifiable HTTP endpoint existed. Now methods cascade HTTP-first: one-click POST (RFC 8058) → plain GET on the URL → mailto only as last resort, returning on the first success. (2) `buildUnsubscribeEmail` dropped the raw mailto value (which can carry `?subject=...&body=...` per RFC 2369/6068) straight into the `To:` header → invalid recipient → bounce. New `parseMailto` splits the address from its query params and honours the sender's requested subject/body.
+- **Unsubscribed senders still shown under junk/other** (`SenderList.tsx`): "cleaned" now means `is_unsubscribed` OR `email_count===0` (previously only zero-count), so after Unsubscribe Only the sender drops out of the junk/unsure/safe tabs by default; "Show cleaned" brings it back. Tab counts track the same filter so the number on each tab matches its rows.
 
 ### Known limitations
 - Cancelling a scan now SAVES partial results (senders scanned so far are classified and kept); the empty-state cancel was fixed in Stage 11.
