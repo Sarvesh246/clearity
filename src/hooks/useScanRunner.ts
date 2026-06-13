@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AUTO_RESUME_MARKER } from '@/lib/scan/scanErrors'
+import { fetchScanProgress, postScanChunk } from '@/lib/scan/scanFetch'
 import { hasIncompleteScan } from '@/lib/scan/scanState'
 import type { ScanProgress } from '@/types'
 
@@ -69,6 +70,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
   const activeRef = useRef(false)
   const scanGeneration = useRef(0)
   const isResumeRun = useRef(false)
+  const chunkAbortRef = useRef<AbortController | null>(null)
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -77,9 +79,9 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
     }
   }, [])
 
-  const pollProgress = useCallback(async () => {
+  const pollProgress = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch('/api/scan/progress', { cache: 'no-store' })
+      const res = await fetchScanProgress(signal)
       if (!res.ok) return
       const data: ScanProgress = await res.json()
 
@@ -135,47 +137,54 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
     opts?: StartScanOptions,
     source: ChunkSource = 'background'
   ) => {
-    if (chunkInFlight.current) {
-      if (source === 'user') pendingUserChunk.current = opts ?? {}
+    if (source === 'user') {
+      chunkAbortRef.current?.abort()
+      pendingUserChunk.current = opts ?? {}
+      if (chunkInFlight.current) return
+    } else if (chunkInFlight.current) {
       return
     }
 
-    const runOnce = async (chunkOpts?: StartScanOptions) => {
+    const runOnce = async (chunkOpts?: StartScanOptions, runSource: ChunkSource = source) => {
       const gen = scanGeneration.current
+      const ac = new AbortController()
+      chunkAbortRef.current = ac
       try {
-        const res = await fetch('/api/scan', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(chunkOpts ?? {}),
-          cache: 'no-store',
-        })
+        const { ok, data } = await postScanChunk(chunkOpts ?? {}, ac.signal)
         if (gen !== scanGeneration.current) return
 
-        const data = await res.json().catch(() => ({}))
         if (data.error === 'gmail_auth_expired') {
           onAuthExpired?.()
           return
         }
 
-        // Sync UI with server-written error / progress state immediately.
         await pollProgress()
 
-        if (!res.ok && activeRef.current && data.error && data.continued === false) {
+        if (!ok && activeRef.current && data.error && data.continued === false) {
           setScanError(true)
           setIsScanning(false)
           activeRef.current = false
         }
-      } catch {
+
+        if (data.skipped && runSource === 'user' && activeRef.current) {
+          await new Promise(r => setTimeout(r, 800))
+          if (gen === scanGeneration.current && activeRef.current) {
+            pendingUserChunk.current = chunkOpts ?? {}
+          }
+        }
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return
         await pollProgress()
+      } finally {
+        if (chunkAbortRef.current === ac) chunkAbortRef.current = null
       }
     }
 
     chunkInFlight.current = true
     try {
-      // Drain loop: user clicks queued while a chunk was in flight run next.
       let current: StartScanOptions | null = opts ?? {}
       while (current) {
-        await runOnce(current)
+        await runOnce(current, source)
         current = pendingUserChunk.current
         pendingUserChunk.current = null
       }
@@ -190,7 +199,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
     // Read latest progress via a fresh fetch for stale-kick decisions — pollProgress
     // updates React state asynchronously so we can't rely on closure values here.
     try {
-      const res = await fetch('/api/scan/progress', { cache: 'no-store' })
+      const res = await fetchScanProgress()
       if (!res.ok) return
       const data: ScanProgress = await res.json()
       if (data.action_type) return
@@ -218,6 +227,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
 
   const startScan = useCallback((opts: StartScanOptions = {}) => {
     scanGeneration.current += 1
+    chunkAbortRef.current?.abort()
     isResumeRun.current = !!opts.resume
     activeRef.current = true
     setIsScanning(true)
@@ -239,6 +249,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
   const cancelScan = useCallback(async () => {
     activeRef.current = false
     scanGeneration.current += 1
+    chunkAbortRef.current?.abort()
     pendingUserChunk.current = null
     stopPolling()
     setIsScanning(false)
@@ -264,7 +275,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
 
   const resumeIfNeeded = useCallback(async () => {
     try {
-      const res = await fetch('/api/scan/progress', { cache: 'no-store' })
+      const res = await fetchScanProgress()
       if (!res.ok) return
       const data: ScanProgress = await res.json()
 
