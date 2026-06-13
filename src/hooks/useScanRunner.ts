@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AUTO_RESUME_MARKER } from '@/lib/scan/scanErrors'
-import { fetchScanProgress, postScanChunk } from '@/lib/scan/scanFetch'
+import { fetchScanProgress, postScanChunk, purgeScanServiceWorkers } from '@/lib/scan/scanFetch'
 import { hasIncompleteScan } from '@/lib/scan/scanState'
 import type { ScanProgress } from '@/types'
 
@@ -20,6 +20,8 @@ export interface StartScanOptions {
 type ChunkSource = 'user' | 'background'
 
 const STALE_KICK_MS = 3 * 60 * 1000
+const MIN_BACKGROUND_CHUNK_MS = 8_000
+const MAX_SKIPPED_RETRIES = 4
 
 function scanNeedsContinuation(data: ScanProgress): boolean {
   if (data.status === 'cancelled') return false
@@ -44,8 +46,13 @@ export function canContinueScan(data: ScanProgress): boolean {
 }
 
 function isProgressStale(data: ScanProgress): boolean {
-  if (!data.updated_at) return true
+  // Missing updated_at used to mean "always stale" → POST /api/scan spam every 2s.
+  if (!data.updated_at) return false
   return Date.now() - new Date(data.updated_at).getTime() > STALE_KICK_MS
+}
+
+function serverHandlesResume(data: ScanProgress): boolean {
+  return data.status === 'error' && data.phase.includes(AUTO_RESUME_MARKER)
 }
 
 function isAutoResumingError(data: ScanProgress): boolean {
@@ -71,6 +78,8 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
   const scanGeneration = useRef(0)
   const isResumeRun = useRef(false)
   const chunkAbortRef = useRef<AbortController | null>(null)
+  const lastChunkAtRef = useRef(0)
+  const skippedRetriesRef = useRef(0)
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -140,8 +149,14 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
     if (source === 'user') {
       chunkAbortRef.current?.abort()
       pendingUserChunk.current = opts ?? {}
+      skippedRetriesRef.current = 0
       if (chunkInFlight.current) return
     } else if (chunkInFlight.current) {
+      return
+    }
+
+    const now = Date.now()
+    if (source === 'background' && now - lastChunkAtRef.current < MIN_BACKGROUND_CHUNK_MS) {
       return
     }
 
@@ -149,6 +164,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       const gen = scanGeneration.current
       const ac = new AbortController()
       chunkAbortRef.current = ac
+      lastChunkAtRef.current = Date.now()
       try {
         const { ok, data } = await postScanChunk(chunkOpts ?? {}, ac.signal)
         if (gen !== scanGeneration.current) return
@@ -160,17 +176,30 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
 
         await pollProgress()
 
-        if (!ok && activeRef.current && data.error && data.continued === false) {
+        const continued = data.continued !== false
+        const fatal = !ok && !!data.error && !continued
+
+        if (fatal && activeRef.current) {
           setScanError(true)
           setIsScanning(false)
           activeRef.current = false
+          return
         }
 
         if (data.skipped && runSource === 'user' && activeRef.current) {
-          await new Promise(r => setTimeout(r, 800))
-          if (gen === scanGeneration.current && activeRef.current) {
-            pendingUserChunk.current = chunkOpts ?? {}
+          skippedRetriesRef.current += 1
+          if (skippedRetriesRef.current <= MAX_SKIPPED_RETRIES) {
+            await new Promise(r => setTimeout(r, 1000 * skippedRetriesRef.current))
+            if (gen === scanGeneration.current && activeRef.current) {
+              pendingUserChunk.current = chunkOpts ?? {}
+            }
+          } else {
+            setScanError(true)
+            setIsScanning(false)
+            activeRef.current = false
           }
+        } else if (!data.skipped) {
+          skippedRetriesRef.current = 0
         }
       } catch (err) {
         if ((err as Error).name === 'AbortError') return
@@ -190,6 +219,11 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       }
     } finally {
       chunkInFlight.current = false
+      if (pendingUserChunk.current) {
+        const pending = pendingUserChunk.current
+        pendingUserChunk.current = null
+        void requestChunk(pending, 'user')
+      }
     }
   }, [onAuthExpired, pollProgress])
 
@@ -207,7 +241,8 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
       if (
         scanNeedsContinuation(data) &&
         isProgressStale(data) &&
-        !chunkInFlight.current
+        !chunkInFlight.current &&
+        !serverHandlesResume(data)
       ) {
         const kickOpts = data.status === 'error' || isResumeRun.current
           ? { resume: true }
@@ -294,7 +329,8 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
         setIsScanning(true)
         setScanError(false)
         beginPolling()
-        if (isProgressStale(data)) {
+        // Auto-resuming errors are handled by the server worker — don't spam POST.
+        if (isProgressStale(data) && !serverHandlesResume(data)) {
           void requestChunk({ resume: true }, 'background')
         }
       } else if (data.status === 'error' && !isAutoResumingError(data)) {
@@ -306,6 +342,7 @@ export function useScanRunner(options: UseScanRunnerOptions = {}) {
   }, [beginPolling, requestChunk])
 
   useEffect(() => {
+    void purgeScanServiceWorkers()
     if (resumedRef.current) return
     resumedRef.current = true
     void resumeIfNeeded()

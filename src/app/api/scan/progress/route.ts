@@ -2,6 +2,11 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import type { ScanProgress } from '@/types'
 
+const NO_CACHE = {
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+  Pragma: 'no-cache',
+}
+
 export async function GET() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -18,7 +23,7 @@ export async function GET() {
 
   if (!data) {
     const idle: ScanProgress = { status: 'idle', phase: '', scanned: 0, total: 0 }
-    return NextResponse.json(idle)
+    return NextResponse.json(idle, { headers: NO_CACHE })
   }
 
   const progress: ScanProgress = {
@@ -35,5 +40,5 @@ export async function GET() {
     unsubscribe_statuses: data.unsubscribe_statuses ?? {},
   }
 
-  return NextResponse.json(progress)
+  return NextResponse.json(progress, { headers: NO_CACHE })
 }

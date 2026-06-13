@@ -2,42 +2,35 @@
 
 import { useEffect } from 'react'
 
-/** Drop legacy caches that previously stored failed /api/scan responses. */
-async function purgeLegacyCaches() {
-  if (!('caches' in window)) return
-  const keys = await caches.keys()
-  await Promise.all(
-    keys
-      .filter(k => k.startsWith('clearity-') && k !== 'clearity-v4')
-      .map(k => caches.delete(k))
-  )
-}
-
 export default function ServiceWorkerRegister() {
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return
 
-    const register = () => {
-      void purgeLegacyCaches()
-      navigator.serviceWorker
-        .register('/sw.js')
-        .then(reg => {
-          void reg.update()
-          if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' })
-        })
-        .catch(() => {
-          // Non-fatal — app works without offline support.
-        })
+    const register = async () => {
+      // Wipe every registration + cache first — old SWs replayed cached 500s
+      // for POST /api/scan (0ms failures until devtools was opened).
+      const regs = await navigator.serviceWorker.getRegistrations()
+      await Promise.all(regs.map(r => r.unregister()))
+      if ('caches' in window) {
+        const keys = await caches.keys()
+        await Promise.all(keys.filter(k => k.startsWith('clearity-')).map(k => caches.delete(k)))
+      }
+
+      try {
+        const reg = await navigator.serviceWorker.register('/sw.js')
+        await reg.update()
+      } catch {
+        // Non-fatal — app works without offline support.
+      }
     }
 
-    // Defer SW install so the first scan click never races SW activation.
     let idleId: number | undefined
     let timerId: ReturnType<typeof setTimeout> | undefined
 
     if (typeof window.requestIdleCallback === 'function') {
-      idleId = window.requestIdleCallback(register, { timeout: 8000 })
+      idleId = window.requestIdleCallback(() => { void register() }, { timeout: 10000 })
     } else {
-      timerId = setTimeout(register, 4000)
+      timerId = setTimeout(() => { void register() }, 5000)
     }
 
     return () => {

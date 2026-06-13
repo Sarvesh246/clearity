@@ -127,10 +127,10 @@ async function saveScanProgress(
     ...fields,
     updated_at: new Date().toISOString(),
   }).eq('user_id', userId)
-  // Surface (don't swallow) write failures — a silently-failing status write
-  // makes the whole scan look like it "crashes" with no trace. Logging here is
-  // what turns a schema/permissions drift from a mystery into a one-line clue.
-  if (error) console.error('[scan] saveScanProgress failed:', error.message)
+  if (error) {
+    console.error('[scan] saveScanProgress failed:', error.message)
+    throw new Error(error.message)
+  }
 }
 
 export async function runScanChunk(
