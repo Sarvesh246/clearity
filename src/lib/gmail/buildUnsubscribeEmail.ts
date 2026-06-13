@@ -28,10 +28,13 @@ export function parseMailto(rawMailto: string): { to: string; subject: string; b
 export function buildUnsubscribeEmail(rawMailto: string): string {
   const { to, subject, body } = parseMailto(rawMailto)
 
+  // Omit From — Gmail's messages.send API sets it from the authenticated account.
+  // An explicit "From: me" is RFC-invalid and causes strict SMTP servers (e.g.
+  // customer.io) to close the connection mid-transfer ("closed pipe" / 554).
   const raw = [
     `To: ${to}`,
-    'From: me',
     `Subject: ${subject}`,
+    'MIME-Version: 1.0',
     'Content-Type: text/plain; charset="UTF-8"',
     '',
     body,

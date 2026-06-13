@@ -127,6 +127,7 @@ export default function DashboardContent({
           </p>
           <Link
             href="/dashboard/senders"
+            prefetch={false}
             className="neu-button w-full flex items-center justify-center gap-2 min-h-[48px] px-6 py-3 text-white font-semibold text-sm"
             style={{ boxShadow: '0 0 16px #45aaf230, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
           >
@@ -323,6 +324,7 @@ export default function DashboardContent({
           <>
             <Link
               href="/dashboard/senders"
+              prefetch={false}
               className="neu-button w-full flex items-center justify-center gap-2 min-h-[52px] px-6 py-4 text-white font-semibold text-base"
               style={{ boxShadow: '0 0 20px #45aaf240, 6px 6px 12px #111116, -6px -6px 12px #2c2c35' }}
             >

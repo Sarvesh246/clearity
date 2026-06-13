@@ -74,8 +74,13 @@ export async function unsubscribeSender(
     }
   }
 
-  // Method 3: mailto — last resort, since it can bounce after we report success
-  if (sender.unsubscribe_mailto) {
+  // Method 3: mailto — only when there is no URL at all.
+  // If we already tried an HTTP method and it failed, the sender's mail
+  // infrastructure is broken too; sending an email just produces a bounce
+  // notification (554 "closed pipe") without actually unsubscribing anyone.
+  // Major email clients (Apple Mail, Outlook) also never fall back to mailto
+  // when a URL is present.
+  if (sender.unsubscribe_mailto && !sender.unsubscribe_url) {
     try {
       const raw = buildUnsubscribeEmail(sender.unsubscribe_mailto)
       await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })

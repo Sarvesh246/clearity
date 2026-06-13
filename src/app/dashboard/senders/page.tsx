@@ -2,11 +2,11 @@ import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import { ArrowLeft, Settings } from 'lucide-react'
-import type { Classification } from '@/types'
 import SenderList from '@/components/SenderList'
 import ErrorBoundary from '@/components/ErrorBoundary'
-import { fetchAllRows } from '@/lib/supabase/fetchAllRows'
-import type { UserSender } from '@/types'
+import { loadUserSenders } from '@/lib/senders/loadUserSenders'
+
+export const dynamic = 'force-dynamic'
 
 export default async function SendersPage() {
   const supabase = await createClient()
@@ -14,41 +14,12 @@ export default async function SendersPage() {
 
   if (!user) redirect('/')
 
-  let allSenders: UserSender[]
-  let allOverrides: { sender_email: string; override: string }[]
+  let senders
   try {
-    // Paginated — a single select caps at 1000 rows and would silently
-    // truncate large inboxes.
-    ;[allSenders, allOverrides] = await Promise.all([
-      fetchAllRows<UserSender>((from, to) =>
-        supabase
-          .from('user_senders')
-          .select('*')
-          .eq('user_id', user.id)
-          .order('email_count', { ascending: false })
-          .order('sender_email', { ascending: true })
-          .range(from, to)
-      ),
-      fetchAllRows((from, to) =>
-        supabase
-          .from('user_sender_overrides')
-          .select('sender_email, override')
-          .eq('user_id', user.id)
-          .range(from, to)
-      ),
-    ])
+    senders = await loadUserSenders(supabase, user.id)
   } catch {
     redirect('/dashboard')
   }
-
-  const overrideMap = new Map(
-    allOverrides.map(o => [o.sender_email, o.override as Classification])
-  )
-
-  const senders = allSenders.map(s => ({
-    ...s,
-    classification: (overrideMap.get(s.sender_email) ?? s.classification) as Classification | null,
-  }))
 
   return (
     <main className="min-h-screen flex flex-col bg-base">

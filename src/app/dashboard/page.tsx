@@ -4,8 +4,9 @@ import { calculateHealthScore } from '@/lib/scoring'
 import { hasIncompleteScan } from '@/lib/scan/scanState'
 import DashboardContent from './DashboardContent'
 import ErrorBoundary from '@/components/ErrorBoundary'
-import { fetchAllRows } from '@/lib/supabase/fetchAllRows'
-import type { UserSender } from '@/types'
+import { loadUserSenders } from '@/lib/senders/loadUserSenders'
+
+export const dynamic = 'force-dynamic'
 
 export default async function DashboardPage() {
   const supabase = await createClient()
@@ -14,16 +15,7 @@ export default async function DashboardPage() {
 
   const [{ data: profile }, allSenders, { data: scanJob }] = await Promise.all([
     supabase.from('profiles').select('last_scan_at').eq('id', user.id).single(),
-    // Paginated — a single select caps at 1000 rows, which would skew the
-    // health score and junk/safe counts for large inboxes.
-    fetchAllRows<UserSender>((from, to) =>
-      supabase
-        .from('user_senders')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('id', { ascending: true })
-        .range(from, to)
-    ).catch(() => [] as UserSender[]),
+    loadUserSenders(supabase, user.id).catch(() => []),
     supabase.from('scan_jobs').select('status, scanned, total, cursor, list_complete, list_page_token').eq('user_id', user.id).maybeSingle(),
   ])
   const health = calculateHealthScore(allSenders)

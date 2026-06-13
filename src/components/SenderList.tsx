@@ -8,9 +8,12 @@ import { ScanLine } from 'lucide-react'
 import type { UserSender, FilterValue, Classification } from '@/types'
 import FilterTabs from './FilterTabs'
 import SenderCard from './SenderCard'
+import SenderPagination from './SenderPagination'
 import ActionBar from './ActionBar'
 import ProgressModal from './ProgressModal'
 import InstallPrompt from './InstallPrompt'
+
+const PAGE_SIZE = 50
 
 interface SenderListProps {
   senders: UserSender[]
@@ -138,13 +141,37 @@ export default function SenderList({ senders }: SenderListProps) {
     useState<{ processed: number; failed: number; unsubscribed?: number } | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const lastRequestRef = useRef<{ url: string; body: object } | null>(null)
+  const listScrollRef = useRef<HTMLDivElement>(null)
   // Remount the modal per action so its internal state starts fresh each time
   const [actionEpoch, setActionEpoch] = useState(0)
+  const [currentPage, setCurrentPage] = useState(1)
 
   // Sync if parent re-fetches (e.g., navigation)
   useEffect(() => {
     dispatch({ type: 'INIT_SENDERS', senders })
   }, [senders])
+
+  // Always pull fresh sender data on mount — the dashboard refreshes after a
+  // scan/cancel but soft navigation can still serve a stale RSC payload here.
+  useEffect(() => {
+    const ac = new AbortController()
+    fetch(`/api/senders?t=${Date.now()}`, { cache: 'no-store', signal: ac.signal })
+      .then(async res => {
+        if (res.status === 401) {
+          router.push('/?message=gmail_auth_expired')
+          return null
+        }
+        if (!res.ok) throw new Error('fetch failed')
+        return res.json() as Promise<{ senders: UserSender[] }>
+      })
+      .then(data => {
+        if (data?.senders) {
+          dispatch({ type: 'INIT_SENDERS', senders: data.senders })
+        }
+      })
+      .catch(() => {})
+    return () => ac.abort()
+  }, [router])
 
   async function postAction(url: string, body: object) {
     lastRequestRef.current = { url, body }
@@ -206,6 +233,27 @@ export default function SenderList({ senders }: SenderListProps) {
     () => visibleSenders.map(s => s.sender_email),
     [visibleSenders]
   )
+
+  const totalPages = Math.max(1, Math.ceil(visibleSenders.length / PAGE_SIZE))
+
+  const pageSenders = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE
+    return visibleSenders.slice(start, start + PAGE_SIZE)
+  }, [visibleSenders, currentPage])
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [activeFilter, hideZeroEmail])
+
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(totalPages)
+  }, [currentPage, totalPages])
+
+  function goToPage(page: number) {
+    const next = Math.max(1, Math.min(page, totalPages))
+    setCurrentPage(next)
+    listScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
   const allVisibleSelected =
     visibleSenders.length > 0 && visibleSenders.every(s => selectedSenders.has(s.sender_email))
@@ -363,7 +411,7 @@ export default function SenderList({ senders }: SenderListProps) {
   if (allVisibleSelected) {
     selectAllLabel = 'Deselect All'
   } else if (selectedCount > 0) {
-    selectAllLabel = `${selectedCount} of ${localSenders.length} selected`
+    selectAllLabel = `${selectedCount} of ${visibleSenders.length.toLocaleString()} selected`
   } else {
     selectAllLabel = 'Select All'
   }
@@ -411,9 +459,11 @@ export default function SenderList({ senders }: SenderListProps) {
         </button>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 13, color: '#8888a0' }}>
-            {selectedCount > 0 && selectedCount < localSenders.length
+            {selectedCount > 0 && selectedCount < visibleSenders.length
               ? selectAllLabel
-              : `${visibleSenders.length.toLocaleString()} senders`}
+              : totalPages > 1
+                ? `Page ${currentPage} of ${totalPages}`
+                : `${visibleSenders.length.toLocaleString()} senders`}
           </span>
           <button
             onClick={() => dispatch({ type: 'TOGGLE_HIDE_ZERO' })}
@@ -426,8 +476,9 @@ export default function SenderList({ senders }: SenderListProps) {
         </div>
       </div>
 
-      {/* Sender list */}
+      {/* Sender list — paginated for display; selection/actions use full filter */}
       <div
+        ref={listScrollRef}
         className="overflow-y-auto flex-1"
         style={{ paddingBottom: 'calc(120px + env(safe-area-inset-bottom))' }}
       >
@@ -439,18 +490,38 @@ export default function SenderList({ senders }: SenderListProps) {
             </p>
           </div>
         ) : (
-          <div className="flex flex-col gap-3 px-4 py-3">
-            {visibleSenders.map(sender => (
-              <SenderCard
-                key={sender.id}
-                sender={sender}
-                isSelected={selectedSenders.has(sender.sender_email)}
-                onToggle={email => dispatch({ type: 'TOGGLE_SENDER', email })}
-                onOverride={handleOverride}
-                overriddenAs={state.overrides.get(sender.sender_email) ?? null}
+          <>
+            {totalPages > 1 && (
+              <SenderPagination
+                currentPage={currentPage}
+                totalPages={totalPages}
+                totalItems={visibleSenders.length}
+                pageSize={PAGE_SIZE}
+                onPageChange={goToPage}
               />
-            ))}
-          </div>
+            )}
+            <div className="flex flex-col gap-3 px-4 py-3">
+              {pageSenders.map(sender => (
+                <SenderCard
+                  key={sender.id}
+                  sender={sender}
+                  isSelected={selectedSenders.has(sender.sender_email)}
+                  onToggle={email => dispatch({ type: 'TOGGLE_SENDER', email })}
+                  onOverride={handleOverride}
+                  overriddenAs={state.overrides.get(sender.sender_email) ?? null}
+                />
+              ))}
+            </div>
+            {totalPages > 1 && (
+              <SenderPagination
+                currentPage={currentPage}
+                totalPages={totalPages}
+                totalItems={visibleSenders.length}
+                pageSize={PAGE_SIZE}
+                onPageChange={goToPage}
+              />
+            )}
+          </>
         )}
       </div>
 
