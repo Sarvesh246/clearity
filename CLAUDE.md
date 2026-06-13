@@ -1,226 +1,396 @@
 # Clearity — Inbox Recovery Tool
 
-## Status: Stage 14 Complete — Bulk-action scaling + unsubscribe reliability (June 2026)
+## Status: Stage 15 Complete — Production polish (June 2026)
+
+Production URL: **https://clearitymail.vercel.app**
+
+Clearity scans a user's Gmail inbox (metadata only — no email bodies), groups messages **by sender address**, classifies senders as junk/safe/unsure, and lets users bulk-delete, archive, mark-read, or unsubscribe+delete. Built for large inboxes (~200k+ emails) with resumable background scans.
+
+---
 
 ## Stack
-- Next.js 16 App Router, TypeScript, Tailwind v4
-- Supabase (auth + database)
-- Gmail API + Gemini Flash API
-- PWA (configured in Stage 8)
+
+- **Next.js 16.2** App Router, TypeScript, React 19
+- **Tailwind CSS v4** — tokens in `src/app/globals.css` (`@theme` block); no `tailwind.config.ts`
+- **Supabase** — auth (Google OAuth) + Postgres + RLS
+- **Gmail API** — scan, list, batchModify, send (mailto unsubscribe)
+- **Gemini 2.5 Flash** — sender classification (rule-based fallback)
+- **Framer Motion** — UI animations
+- **PWA** — manifest, service worker, install prompt, offline page
+- **Vercel** — serverless functions (`maxDuration=300` on scan/action routes), `waitUntil` for background scan continuation
+
+---
 
 ## Design System
-- Neumorphism on charcoal base (#1a1a1e)
-- Surface: #222228, shadows: light #2c2c35 / dark #111116
-- Accents: red #e84141, green #26de81, amber #ffb142, blue #45aaf2, purple #a55eea
-- Font: Space Grotesk (loaded via next/font/google)
-- Tailwind v4: design tokens defined in `src/app/globals.css` via `@theme` block
-- CSS classes: .neu-card, .neu-button, .neu-button:active, .neu-inset
 
-## Tailwind v4 Note
-This project uses Tailwind v4. There is NO tailwind.config.ts — all custom colors,
-shadows, and font tokens are declared in `src/app/globals.css` under `@theme {}`.
-Custom utility classes: `bg-base`, `bg-surface`, `text-accent-red`, `shadow-neu`, etc.
+- Neumorphism on charcoal base `#1a1a1e`
+- Surface: `#222228`; shadows: light `#2c2c35` / dark `#111116`
+- Accents: red `#e84141`, green `#26de81`, amber `#ffb142`, blue `#45aaf2`, purple `#a55eea`
+- Font: **Space Grotesk** (Google Fonts + `next/font`)
+- Utility classes: `.neu-card`, `.neu-button`, `.neu-inset`, `.neu-button:active`
+- Tailwind tokens: `bg-base`, `bg-surface`, `text-accent-red`, `shadow-neu`, etc.
+- App shell: `.app-page`, `.app-container` (672px mobile; dashboard wide layout 1040px on lg)
+- Safe-area insets for PWA/notch devices
+- `@media (prefers-reduced-motion: reduce)` disables transitions
+- `focus-visible` ring for keyboard nav
 
-## Database Tables
-- profiles (id, email, google_refresh_token, last_scan_at)
-- sender_classifications (domain, classification, confidence, method, reason)
-- user_senders (user_id, sender_email, sender_name, domain, email_count, unread_count, has_unsubscribe_header, unsubscribe_mailto, unsubscribe_url, unsubscribe_post, gmail_labels, classification, is_unsubscribed)
-- user_sender_overrides (user_id, sender_email, override)
-- scan_jobs (user_id, status, phase, scanned, total, started_at, completed_at, action_type, processed, sender_statuses)
+---
 
-Schema SQL: `supabase/schema.sql` — apply manually in Supabase SQL editor.
+## Routes & Pages
 
-## What Exists
-- Landing page (`src/app/page.tsx`) with "Sign in with Google" wired to server action
-- Full Tailwind v4 design token system in globals.css
-- Supabase browser client (`src/lib/supabase/client.ts`)
-- Supabase server client (`src/lib/supabase/server.ts`)
-- Auth proxy (`src/proxy.ts`) — redirects unauthenticated users from /dashboard and /scan to / (Next.js 16 renamed middleware → proxy)
-- Utility functions: cn, extractDomain, formatCount (`src/lib/utils.ts`)
-- Google OAuth flow (sign in → callback → profile upsert → /dashboard) (`src/app/actions/auth.ts`, `src/app/auth/callback/route.ts`)
-- Refresh token stored in `profiles.google_refresh_token`
-- Gmail API client helper — `getGmailClient` (`src/lib/gmail/client.ts`)
-- Refresh token server helper — `getRefreshToken` (`src/lib/gmail/getRefreshToken.ts`)
-- Sign out wired — clears token + session
-- Dashboard at `/dashboard` — shows email, wired scan button with live progress UI (`src/app/dashboard/page.tsx`, `src/app/dashboard/DashboardClient.tsx`)
-- Profile auto-creation DB trigger (SQL in comment at top of `src/app/auth/callback/route.ts` — run manually in Supabase)
-- Full inbox scanner (metadata only, no bodies) — `src/lib/gmail/scanner.ts`
-  - Groups emails by sender with email_count, unread_count, gmail_labels
-  - Extracts List-Unsubscribe headers (mailto + url + RFC 8058 post flag)
-  - Chunk-based processing (100/chunk, 2s delay) respects Gmail quota (15k units/min)
-  - Exponential backoff on 429 errors
-- From header parser — `src/lib/gmail/parseFrom.ts`
-- List-Unsubscribe parser — `src/lib/gmail/parseUnsubscribe.ts`
-- Scan API route — POST `/api/scan` runs full scan, upserts user_senders, updates last_scan_at
-- Progress API route — GET `/api/scan/progress` returns current scan_jobs row
-- Progress tracking via scan_jobs table + 2s client polling
-- TypeScript types in `src/types/index.ts` (UserSender, ScanProgress, Classification, FilterValue, ClassificationResult, QuotaExceededError)
-- Two-tier classification engine (Gemini Flash → rule-based fallback) — `src/lib/classification/`
-  - Rule-based: explicit safe/junk domain lists (~150 domains) + signal scoring (List-Unsubscribe header, Gmail labels, frequency, name patterns)
-  - AI: Gemini 1.5 Flash in batches of 20; `QuotaExceededError` causes silent fallback to rule-based for all remaining
-  - Results cached in `sender_classifications` by domain (shared across users)
-  - User overrides always win (`user_sender_overrides` table)
-  - Classification auto-runs after scan completes (single request flow, phase: "Classifying senders...")
-- Standalone classify endpoint — POST `/api/classify` re-classifies unclassified senders without re-scanning
-- Full sender list UI at `/dashboard/senders` (`src/app/dashboard/senders/page.tsx`, `src/components/SenderList.tsx`)
-  - SenderCard: checkbox, avatar, sender info, classification dot, unsubscribe badge (`src/components/SenderCard.tsx`)
-  - FilterTabs: All / Junk / Unsure / Safe with counts, active tab uses neu-inset style (`src/components/FilterTabs.tsx`)
-  - Select All / Deselect All for current filter view; count shows "N of M selected"
-  - Selection state: selectedSenders (Set<string>), persists across tab switches (useReducer)
-  - Sticky ActionBar: slides up via framer-motion when selection exists (`src/components/ActionBar.tsx`)
-    - Buttons: Delete All (red), Mark Read (blue), Archive (amber), Unsubscribe+Delete (red, conditional)
-    - Action buttons are stubs (Stage 7 wires them); hover shows accent color glow
-  - Empty states: no senders, filter-empty, all-cleaned
-  - Loading skeletons via route loading.tsx + LoadingSkeleton component (`src/components/LoadingSkeleton.tsx`)
-- FilterValue type exported from `src/types/index.ts`
+| Route | File | Description |
+|-------|------|-------------|
+| `/` | `src/app/page.tsx` | Landing; Sign in with Google; Gmail-auth-expired banner |
+| `/dashboard` | `src/app/dashboard/page.tsx` + `DashboardContent.tsx` | Health score, stats, scan/sync CTAs, partial-scan UI (`force-dynamic`) |
+| `/dashboard/senders` | `src/app/dashboard/senders/page.tsx` + `SenderList.tsx` | Review & clean inbox (`force-dynamic`) |
+| `/dashboard/settings` | `src/app/dashboard/settings/page.tsx` | Email, sign out |
+| `/offline` | `src/app/offline/page.tsx` | PWA offline fallback |
+| `/auth/callback` | `src/app/auth/callback/route.ts` | Supabase OAuth callback; profile upsert |
 
-## Environment Variables Needed
-Fill in `.env.local`:
-- NEXT_PUBLIC_SUPABASE_URL
-- NEXT_PUBLIC_SUPABASE_ANON_KEY
-- SUPABASE_SERVICE_ROLE_KEY
-- GOOGLE_CLIENT_ID
-- GOOGLE_CLIENT_SECRET
-- GEMINI_API_KEY
-- NEXT_PUBLIC_APP_URL
-- SCAN_WORKER_SECRET — REQUIRED for background scan continuation (tab-closed long scans). Shared bearer secret the app uses to call its own `/api/scan/continue` worker. Must match between the app and itself; set the SAME value in Vercel.
-- CRON_SECRET — REQUIRED for the resume-scans cron safety net. Vercel auto-sends `Authorization: Bearer <CRON_SECRET>` to scheduled crons when this env var is set. Set in Vercel.
+**Auth proxy:** `src/proxy.ts` — redirects unauthenticated users from `/dashboard` and `/scan` to `/` (Next.js 16 middleware renamed to proxy).
 
-- Bulk actions: trash, mark read, archive — all working via Gmail API (`src/app/api/actions/route.ts`)
-  - `getMessageIdsForSenders` — paginates messages.list per sender, max 5 concurrent (`src/lib/gmail/getMessageIds.ts`)
-  - `trashMessages`, `markAsRead`, `archiveMessages` — batchModify in chunks of 1000, 429 retry (`src/lib/gmail/bulkActions.ts`)
-  - Real-time progress via scan_jobs table (action_type, processed, sender_statuses JSONB), polled every 1.5s
-  - ProgressModal: per-sender ✓/⏳/○ status, progress bar with accent colors, stall detection with cycling messages (`src/components/ProgressModal.tsx`)
-  - ActionBar: 5-second countdown + draining bar before destructive delete; Mark Read/Archive fire immediately (`src/components/ActionBar.tsx`)
-  - Post-action summary screen with email count, "Clean up more" / "Back to inbox"
-  - Optimistic state updates: trashed senders removed from list, mark_read zeros unread_count — no refetch needed
-  - Error handling: 429 retry with exponential backoff, error state with Retry button
+**Layouts:** `src/app/layout.tsx` — PWA meta, viewport, `ServiceWorkerRegister`, Space Grotesk.
 
-- Smart unsubscribe engine — `src/lib/gmail/unsubscribe.ts`, `src/lib/gmail/buildUnsubscribeEmail.ts`
-  - Three methods in priority order: RFC 8058 POST (`unsubscribe_post + unsubscribe_url`), mailto (`unsubscribe_mailto`), URL GET (`unsubscribe_url`)
-  - Each method has 10s timeout via `AbortController`; failures never block email deletion
-- Unsubscribe + Delete API route — POST `/api/unsubscribe`
-  - Phase 1: Unsubscribes all senders that have `has_unsubscribe_header = true` (max 5 concurrent)
-  - Phase 2: Trashes all emails from all selected senders (including those without unsubscribe headers)
-  - Updates `user_senders.is_unsubscribed = true` for successful unsubscribes, zeros `email_count` for all
-  - Tracks per-sender unsubscribe results in `scan_jobs.unsubscribe_statuses` JSONB
-- Progress modal (`ProgressModal.tsx`) extended with two-phase unsubscribe+delete display
-  - Phase 1: per-sender ✓/✗/— icons with method label (one-click / via email / via URL / no automatic method)
-  - Phase 2: standard email-count progress bar (reuses Stage 6 UI)
-  - Summary shows "Unsubscribed from X senders and deleted Y emails"
-- SenderCard badge: green "✓ Unsubscribed" when `is_unsubscribed = true`; blue "✉ Unsubscribe available" otherwise
-- ActionBar: shows note "X senders won't be auto-unsubscribed — emails will still be deleted" when mixed selection
+---
 
-- PWA manifest (`public/manifest.json`) with charcoal theme (#1a1a1e), standalone display, portrait orientation
-- App icons (`public/icons/icon-192.png`, `icon-512.png`, `icon.svg`) — envelope + lightning bolt concept on charcoal bg
-- Service worker (`public/sw.js`): cache-first for static assets, network-first for `/api/*`, offline fallback to `/offline`
-- All iOS PWA meta tags via Next.js metadata/viewport exports in `src/app/layout.tsx` (apple-mobile-web-app-capable, status-bar-style: black-translucent, touch icon, manifest link)
-- Safe area insets: nav bar top (`env(safe-area-inset-top)`) in senders page; ActionBar bottom already uses `max(12px, env(safe-area-inset-bottom))`
-- Add to home screen prompt (`src/components/InstallPrompt.tsx`): iOS instructions (Share → Add to Home Screen), Android native `beforeinstallprompt` flow; dismisses for 7 days
-- Desktop max-width layout: senders page content capped at 672px centered; ActionBar inner card also constrained
-- FilterTabs tap targets bumped to 44px height
-- Offline fallback page at `/offline` (`src/app/offline/page.tsx`) — matches app design
-- ServiceWorkerRegister client component (`src/components/ServiceWorkerRegister.tsx`) — registers `sw.js` on mount
-- Icon generation script: `scripts/generate-icons.mjs` (uses sharp devDep)
+## API Routes
 
-- Full dashboard at `/dashboard`: health score circle, stat cards (junk/unsure/safe), junk email total, primary CTA to senders (`src/app/dashboard/page.tsx`, `src/app/dashboard/DashboardContent.tsx`)
-- Health score: 0-100 formula in `src/lib/scoring.ts` — deducts for junk (-2) and unsure (-1) senders, adds for unsubscribed (+1), extra deductions for high unread or >50 junk senders
-- Score labels: Healthy (green, 80-100) / Cluttered (amber, 50-79) / Messy (red, 20-49) / Critical (red + pulse, 0-19)
-- Score circle SVG animation on mount, draws from 0 to score — `src/components/HealthScoreCircle.tsx`
-- StatCard component — reusable neu-card with icon, colored value, label (`src/components/StatCard.tsx`)
-- No-scan placeholder state: "?" circle, dashes in stats, "Scan My Inbox" as primary CTA
-- Rescan flow inline on dashboard: progress bar + phase text, on complete calls `router.refresh()` to reload server data
-- Settings page at `/dashboard/settings`: email display, back to dashboard link, sign out (`src/app/dashboard/settings/page.tsx`)
-- Gear icon in dashboard header links to settings; back arrow in settings returns to dashboard
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/scan` | Start/resume/full/incremental scan chunk (`maxDuration=300`) |
+| POST | `/api/scan/continue` | Background worker continuation (bearer `SCAN_WORKER_SECRET`) |
+| POST | `/api/scan/cancel` | Cancel in-progress scan; keeps partial results |
+| GET | `/api/scan/progress` | Current `scan_jobs` row (no-cache) |
+| GET | `/api/senders` | Fresh sender list for client refresh (no-cache) |
+| POST | `/api/actions` | Bulk trash / mark_read / archive (`maxDuration=300`) |
+| POST | `/api/unsubscribe` | Unsubscribe ± delete (`maxDuration=300`) |
+| POST | `/api/classify` | Re-classify unclassified senders without re-scan |
+| POST | `/api/overrides` | User safe/junk override per sender |
+| GET | `/api/cron/resume-scans` | Cron safety net for stalled scans (`CRON_SECRET`) |
 
-## Stage 10 — Polish & Reliability
+All scan/action JSON responses use `Cache-Control: no-store` via `src/lib/api/scanResponse.ts`.
 
-### Added in Stage 10
-- ErrorBoundary: Class component (`src/components/ErrorBoundary.tsx`) wrapping dashboard and senders page; neumorphic "Something went wrong" card with retry button
-- Gmail token expiry: API routes (scan, actions, unsubscribe) detect Google 401/invalid_grant, clear `google_refresh_token` from profiles, return structured 401; DashboardContent redirects to `/?message=gmail_auth_expired`; landing page shows error banner when param present; shared helper `src/lib/gmail/handleTokenExpiry.ts`
-- Re-scan clear: `scan/route.ts` DELETEs user_senders before starting new scan; `sender_classifications` cache preserved (AI results reused)
-- Scan cancellation: POST `/api/scan/cancel` sets scan_jobs status to 'cancelled'; scanner.ts accepts AbortSignal and throws ScanCancelledError; scan/route.ts polls DB every 3s and aborts; DashboardContent shows Cancel button and handles 'cancelled' status in poll
-- Estimated scan time: scanner.ts calculates rate-based ETA and includes it in onProgress phase text after first chunk
-- Sender overrides UI: SenderCard shows hover overlay (desktop) and long-press overlay (mobile) with Safe/Junk buttons; dispatches to POST `/api/overrides`; override badge shown on card; override state managed in SenderList reducer
-- Hide cleaned toggle: SenderList filters out email_count=0 senders by default; "Show cleaned" / "Hide cleaned" toggle button in toolbar
-- Unsubscribe Only: ActionBar overflow ⋯ menu with "Unsubscribe Only" option (shown when unsubscribable senders selected); POST `/api/unsubscribe` accepts `deleteAfter: false` to skip Phase 2
-- Accessibility: FilterTabs `role="tablist"`/`role="tab"`/`aria-selected`; LoadingSkeleton `role="status"`/`aria-busy`/sr-only text; SenderCard checkbox `role="checkbox"`/`aria-checked`/`tabIndex`/keyboard nav; ProgressModal `role="dialog"`/`aria-modal`/`aria-live` on progress text; Escape key closes modal; focus-visible ring in globals.css
-- Reduced motion: `@media (prefers-reduced-motion: reduce)` block in globals.css disables all transitions
-- ETA in ProgressModal: rate-based estimated time remaining shown for bulk actions after 100+ processed
-- Checkbox micro-animation: scale pulse on toggle via Framer Motion
+---
 
-## Stage 11 — Resumable & Background Scans (200k+ inboxes)
+## Database Schema
 
-### Architecture
-- Listing and reading are split into time-boxed chunks. Each Vercel invocation runs ~270s (`CHUNK_TIME_BUDGET_MS`), then schedules the next chunk server-side via `waitUntil` → `POST /api/scan/continue` (`src/lib/scan/scheduleContinuation.ts`). Scans continue with the tab closed.
-- Message IDs persist in `scan_message_ids` (one row per ID); progress/cursor/page-token persist in `scan_jobs`. Senders are upserted and classified per chunk, so partial results are always saved and reviewable.
-- Cron safety net `*/2` (`/api/cron/resume-scans`, `vercel.json`) re-kicks scans that stalled (worker timeout, network drop). NOTE: Vercel Hobby caps crons at once/day — the `waitUntil` chain is the primary driver and works on any plan; the cron is backup.
-- Incremental sync: after a full scan, `gmail_history_id` is stored; "Sync New Emails" uses `history.list` to fetch only new messages.
+Apply `supabase/schema.sql` manually in Supabase SQL editor (includes Stage 6–11 migrations).
 
-### Reliability fixes (rate limits + start/stop correctness)
-- **Atomic chunk lock** (`src/lib/scan/chunkLock.ts`): single compare-and-swap UPDATE (`chunk_locked_at IS NULL OR < stale`) guarantees only one chunk runs per user. The previous check-then-update was racy and let two workers run concurrently → doubled Gmail request rate → 429s. The lock no longer gates on `status='scanning'`, so fresh starts/rescans after complete/cancel/idle actually run (previously silently `skipped`).
-- **Adaptive throttle** (`src/lib/gmail/scanner.ts`): paces `messages.get` against Gmail's real limit (250 quota units/user/sec; get = 5 units). Starts ~24 msg/s (~120 units/s), ramps to 40, halves on any 429/rate signal, then re-ramps — stays just below the ceiling. Replaces the old fixed 12s/batch delay (~92 msg/min → 200k took ~36h; now ~2–3h).
-- **Transient resilience**: 404/410 (message deleted/moved mid-scan) are skipped, not fatal; 5xx retried with backoff. Prevents long scans crashing near the end.
-- **Continuation guard** (`runScanChunk` `continuation` flag): background workers only RESUME in-progress scans — never start a fresh/incremental one. Stops a stray continuation (fired just before a cancel) from wiping `user_senders` and restarting a full rescan.
+### Tables
 
-### Stage 11 known limitations
-- Requires `SCAN_WORKER_SECRET` + `CRON_SECRET` env vars (app + Vercel) and the Stage 11 SQL migration applied; without the worker secret, scans stall when the tab closes.
-- Clicking "Scan" within ~3s of "Cancel" can no-op once (old chunk still releasing the lock) — click again; it self-heals.
-- Intra-slice crash re-scans at most one sub-slice (~500 msgs) since the Stage 13 checkpointing pass; a crash in the narrow window between sender upsert and cursor commit can double-count up to that many messages.
+**profiles**
+- `id` (FK auth.users), `email`, `google_refresh_token`, `last_scan_at`, `gmail_history_id`, `created_at`
 
-## Stage 12 — Production hardening (full-debug pass)
+**user_senders** — one row per unique `From` email address
+- `id`, `user_id`, `sender_email`, `sender_name`, `domain`
+- `email_count`, `unread_count`
+- `has_unsubscribe_header`, `unsubscribe_mailto`, `unsubscribe_url`, `unsubscribe_post`
+- `gmail_labels[]`, `classification`, `classification_method`, `is_unsubscribed`, `last_scanned_at`
+- UNIQUE `(user_id, sender_email)`
 
-### Fixed
-- **Auth-expiry worker runaway**: a revoked/missing refresh token mid-scan made `/api/scan/continue` reschedule itself forever (infinite Vercel invocations). Missing token is now a typed `GmailNotConnectedError` (`src/lib/gmail/getRefreshTokenForUser.ts`) treated as auth expiry; continue route never reschedules `gmail_auth_expired`; plain chunk errors reschedule with a 30s delay (`scheduleScanContinuation(..., { delayMs })`) so persistent failures back off.
-- **Cron resumes errored scans**: `/api/cron/resume-scans` now matches status `scanning` OR `error` (skipping phase `Gmail access expired`) — previously an errored chain whose delayed retry died stranded the scan despite the UI promising auto-resume.
-- **Supabase 1000-row cap**: senders page, dashboard counts/health score, `finalizePartialScan`, classify-cache lookups and overrides all paginate now (`src/lib/supabase/fetchAllRows.ts`); `classify.ts` chunks `.in()` queries (URL-length + row cap). All pagination uses explicit ORDER BY (range without order is non-deterministic).
-- **Classification skip bug**: `classifyUnclassifiedSenders` advanced its offset while the `classification IS NULL` result set shrank — every other page of senders was skipped (left unclassified). Now always re-reads page 0 until empty.
-- **Scan ↔ bulk-action mutual exclusion** (`src/lib/scan/actionGuard.ts`): actions and scans share the `scan_jobs` row + Gmail rate budget. `/api/actions` and `/api/unsubscribe` now 409 (`scan_running`/`busy`) while a live scan runs, hold the chunk lock with a 60s heartbeat for their whole duration, and release in `finally`. `useScanRunner` treats rows with `action_type` set as "not a scan" (no phantom scan UI).
-- **`maxDuration = 300`** on `/api/actions` and `/api/unsubscribe` (they previously ran under the default and could be killed mid-delete).
-- **ProgressModal stale-complete race**: the modal polled the shared `scan_jobs` row and could see a previous run's `complete` instantly → false "Done" + optimistic sender removal before the action even started. Now: terminal statuses are only honored after the action was observed running; the action POST response is the authoritative completion/error signal (`serverResult`/`serverError` props); 20s watchdog catches never-started actions; Retry actually re-POSTs; modal remounts per action (key prop). Also fixed: summary screen was unreachable (modal unmounted on completion).
-- **Optimistic update mismatches**: `unsub_only` no longer zeroes email counts client-side (server keeps them); `unsub_delete` now zeroes counts for non-unsubscribable senders too (server deletes their emails).
-- **Listing-resume duplicate IDs**: resuming the listing phase from a persisted page token dedupes the first re-listed chunk against stored `scan_message_ids` (a crash between insert and token-save previously double-stored and double-scanned those messages).
-- **Gmail retry hardening** (`src/lib/gmail/gmailErrors.ts`): shared 429/403-rate/5xx/network-error classification; `withGmailRetry` on batchModify, per-sender `messages.list` (also quoted `from:"..."` queries), scan listing, and history.list; scanner treats dropped connections (ECONNRESET etc.) as transient.
-- **Gemini model**: `gemini-1.5-flash` is retired (every call 404'd → silent rule-based fallback); now `gemini-2.5-flash`, with quota detection also via message text (`RESOURCE_EXHAUSTED`).
-- Lint is fully clean (`npm run lint` → 0 problems): ActionBar countdown rewritten as a handler-driven interval (no setState-in-effect, no double-fire), ProgressModal ETA/stall state moved out of render, InstallPrompt defers its mount setState.
+**user_sender_overrides** — manual safe/junk; always wins over AI/rules
+- `(user_id, sender_email)` PK, `override`
 
-## Stage 13 — Quota-proof checkpointing (June 2026)
+**sender_classifications** — shared domain cache across users
+- `domain` PK, `classification`, `confidence`, `method`, `reason`
+- `classifier_version` (only reused when `>=` app's `CLASSIFIER_VERSION`)
+- `classified_at`, `updated_at`
 
-Root cause of "scan progress resets to 0 on quota": the resume cursor was only committed once per 7k-message slice (after sender upsert), and the rate-limit backoff loop in `fetchBatch` ignored the chunk time budget — persistent 429s made the function sleep past `maxDuration`, Vercel hard-killed it before the commit, and every retry re-read the slice from the chunk start.
+**scan_jobs** — one row per user (upserted by service role)
+- `user_id` PK, `status`, `phase`, `scanned`, `total`, `started_at`, `completed_at`
+- `action_type`, `processed`, `sender_statuses` JSONB, `unsubscribe_statuses` JSONB
+- **Stage 11:** `cursor`, `list_page_token`, `list_complete`, `chunk_locked_at`, `updated_at`
+- Cancel tracked via `status='cancelled'` + `completed_at` (no `cancelled_at` column)
 
-### Fixed
-- **Sub-slice checkpointing** (`runScanChunk`): the 7k slice is read in 500-message sub-slices; after each one, touched senders are upserted and the cursor committed (upsert BEFORE cursor — resume must never skip unsaved messages). Any crash/kill/quota pause now loses ≤500 messages instead of the whole slice. Classification still runs once per chunk; `finalizePartialScan`/`finalizeScan` sweep up unclassified senders.
-- **Deadline-aware quota backoff** (`scanner.ts` `fetchBatch` + `GmailQuotaPauseError`): if waiting out a 429 backoff would overrun the time budget, the scan pauses gracefully — `scanMessageIds` returns `pausedForQuota` with partial progress, the chunk commits and stays `status='scanning'` with a friendly phase, and the routes reschedule the continuation with a 45s delay so the per-minute quota window rolls over.
-- **Listing-phase quota pause** (`listMessages.ts`): quota errors mid-listing keep the pages already fetched + the current token (previously the whole invocation's pages were thrown away); listing also caps at 20 pages per call so the page token is persisted every ~10k IDs.
-- **Time budget 270s → 240s** (`CHUNK_TIME_BUDGET_MS`): leaves ~60s under `maxDuration=300` for the final upsert/classify/status writes.
-- Quota pause is NOT an error state: no scary red error, progress bar keeps its committed value, scan auto-continues. The `status='error'` + `AUTO_RESUME_MARKER` path remains as fallback for stray quota throws outside the read loop.
+**scan_message_ids** — persisted message IDs for resumable scans (not JSONB)
+- `(user_id, idx)` PK, `message_id`
 
-### Stage 12 known limitations
-- A bulk action over very many emails (≫100k) can exceed the 300s budget; the killed run leaves `scan_jobs` stuck `scanning` until the next scan/action overwrites it (chunk lock self-heals via 6-min staleness; the modal must be dismissed manually).
-- Running a bulk action while a *partial/errored* scan is parked clobbers the scan's resume position (total/scanned reset) — senders/data are kept, but "Continue Scan" disappears; use Sync New Emails or a fresh scan after.
+All tables have RLS; scan writes use service role where needed.
 
-## Stage 14 — Bulk-action scaling + unsubscribe reliability (June 2026)
+---
 
-### Fixed
-- **Phase 2 stuck at 0% on large selections** (`/api/actions`, `/api/unsubscribe` Phase 2): both routes collected message IDs for EVERY selected sender up front (`getMessageIdsForSenders`) before acting. For thousands of senders the "senders processed" bar sat frozen at 0% (senders were only marked `done` in the later action loop), the in-progress count ballooned past the real concurrency ("+N more in parallel"), and on big inboxes the single invocation blew past `maxDuration=300` and was hard-killed with the job stuck `scanning` and ZERO work saved. Now `processSendersInterleaved` (`src/lib/gmail/processSenders.ts`) collects + acts ONE sender at a time at modest concurrency: progress advances continuously, each finished sender's emails are durably trashed, and a 240s time budget (`ACTION_TIME_BUDGET_MS`) stops cleanly with partial results saved (`status='complete'`, phase "Stopped early — run again to finish the rest") instead of being killed. Email-progress denominator is seeded from known `email_count` sums so it shows movement immediately instead of "Collecting message IDs..." forever. Count zeroing only touches senders actually processed.
-- **Unsubscribe emails bouncing** (`src/lib/gmail/unsubscribe.ts`, `buildUnsubscribeEmail.ts`): (1) `unsubscribeSender` preferred mailto over the HTTP URL — it sent a fire-and-forget email (which bounces silently minutes later → "message not delivered") even when a verifiable HTTP endpoint existed. Now methods cascade HTTP-first: one-click POST (RFC 8058) → plain GET on the URL → mailto only as last resort, returning on the first success. (2) `buildUnsubscribeEmail` dropped the raw mailto value (which can carry `?subject=...&body=...` per RFC 2369/6068) straight into the `To:` header → invalid recipient → bounce. New `parseMailto` splits the address from its query params and honours the sender's requested subject/body.
-- **Unsubscribed senders still shown under junk/other** (`SenderList.tsx`): "cleaned" now means `is_unsubscribed` OR `email_count===0` (previously only zero-count), so after Unsubscribe Only the sender drops out of the junk/unsure/safe tabs by default; "Show cleaned" brings it back. Tab counts track the same filter so the number on each tab matches its rows.
+## Architecture Overview
 
-### Known limitations
-- Cancelling a scan now SAVES partial results (senders scanned so far are classified and kept); the empty-state cancel was fixed in Stage 11.
-- Sender override optimistic updates persist if POST `/api/overrides` fails (silently, until page refresh)
-- Estimated time is rate-based and unreliable for the first ~10% of a scan or bulk action
-- Gmail OAuth app is unverified (100-user cap for external users until Google verification)
-- Gmail only — no Outlook/Exchange support
+### Data model: sender-centric (not per-email UI)
 
-### Future work
-- Google OAuth verification (requires Google review, privacy policy, brand assets)
+- Scanner merges every message into a `Map<sender_email, SenderData>` (`mergeMessageIntoSenderMap` in `scanner.ts`).
+- One sender with 500 emails = **one** `user_senders` row with `email_count: 500`.
+- Unsubscribe runs **once per sender** (one List-Unsubscribe attempt per address).
+- Delete/archive/mark-read fetches all message IDs for that sender, then `batchModify` in chunks of 1000.
+
+Grouping is by exact `From` email — same brand using `deals@` vs `noreply@` appears as separate senders.
+
+### Scan pipeline (resumable, 200k+)
+
+```
+POST /api/scan → runScanChunk (240s budget)
+  ├─ Phase A: list message IDs → scan_message_ids + list_page_token
+  └─ Phase B: messages.get metadata → merge into senders → upsert user_senders
+       ├─ Sub-slices of 500 msgs; cursor committed after each upsert
+       ├─ classify unclassified senders per chunk
+       └─ On time budget / quota: save state, schedule continuation
+waitUntil → POST /api/scan/continue (SCAN_WORKER_SECRET)
+Cron backup → GET /api/cron/resume-scans (daily on Hobby; needs CRON_SECRET)
+```
+
+**Key files:**
+- `src/lib/scan/runScanChunk.ts` — orchestration, cancel poll, quota pause, partial finalize
+- `src/lib/gmail/scanner.ts` — adaptive throttle, `CHUNK_TIME_BUDGET_MS=240_000`, `scanMessageIds`
+- `src/lib/gmail/listMessages.ts` — paginated listing with quota pause
+- `src/lib/scan/chunkLock.ts` — atomic compare-and-swap lock (`chunk_locked_at`)
+- `src/lib/scan/scheduleContinuation.ts` — `waitUntil` + delayed retry
+- `src/lib/scan/persistence.ts` — `upsertSendersList`, `loadSendersIntoMap`
+- `src/lib/scan/classifyPartial.ts` — `classifyUnclassifiedSenders`, `finalizePartialScan`
+- `src/lib/scan/scanState.ts` — `scanCheckpoint`, `hasIncompleteScan`, `canResumeScan`
+- `src/lib/scan/scanErrors.ts` — friendly quota copy, `AUTO_RESUME_MARKER`, recoverable vs fatal
+- `src/lib/gmail/incrementalScan.ts` — `history.list` after `gmail_history_id` stored
+
+**Progress semantics:**
+- `cursor` = committed read position (resume uses this only).
+- `scanned` may run ahead for UI during an in-flight chunk.
+- Quota pause is NOT an error — friendly phase, auto-continues after ~45s.
+
+**Cancel:** saves partial results; `finalizePartialScan` classifies + updates `last_scan_at`; senders remain reviewable.
+
+### Classification
+
+`src/lib/classification/` — two-tier engine:
+1. **Gemini 2.5 Flash** — batches of 20 domains; `QuotaExceededError` → silent rule-based for remainder
+2. **Rule-based fallback** — ~150 safe/junk domain lists + signal scoring (List-Unsubscribe, Gmail labels, frequency, name patterns)
+
+- Cache: `sender_classifications` by domain; `CLASSIFIER_VERSION=2` in `features.ts`
+- User overrides always win (`user_sender_overrides`)
+- Runs after each scan chunk + `finalizePartialScan` / `finalizeScan` sweep
+
+### Bulk actions
+
+`src/lib/gmail/processSendersInterleaved.ts` — collect IDs + act **one sender at a time** (concurrency 3), `ACTION_TIME_BUDGET_MS=240_000`:
+- Progress advances continuously; partial work saved if time budget hit
+- `src/lib/gmail/getMessageIds.ts` — `messages.list` with quoted `from:"..."` queries
+- `src/lib/gmail/bulkActions.ts` — `trashMessages`, `markAsRead`, `archiveMessages`; batchModify 1000/chunk; `withGmailRetry`
+- `src/lib/scan/actionGuard.ts` — 409 if scan running; holds chunk lock with 60s heartbeat
+
+### Unsubscribe engine
+
+`src/lib/gmail/unsubscribe.ts` — HTTP-first cascade (Stage 14 fix for bounces):
+1. RFC 8058 one-click POST (`unsubscribe_post` + URL)
+2. Plain GET on unsubscribe URL
+3. Mailto **only** when no URL exists (`buildUnsubscribeEmail.ts` + `parseMailto`)
+
+`POST /api/unsubscribe`:
+- Phase 1: unsubscribe eligible senders (max 5 concurrent)
+- Phase 2: trash all selected senders' emails (`deleteAfter: false` for Unsubscribe Only)
+- Updates `is_unsubscribed`, zeros `email_count` on delete
+
+### Client scan runner
+
+`src/hooks/useScanRunner.ts`:
+- Polls `/api/scan/progress` every 2s
+- User-priority chunk queue; background continuation with throttle
+- Stale-kick only when `updated_at` present and >3min old
+- `canContinueScan` / partial-scan detection for dashboard CTAs
+- Ignores `scan_jobs` rows with `action_type` set (not a scan)
+- On complete: `router.refresh()`; auth expiry → `/?message=gmail_auth_expired`
+
+`src/lib/scan/scanFetch.ts` — cache-bust `?n=` on scan POST/progress; `purgeScanServiceWorkers()` on scan start.
+
+---
+
+## Dashboard
+
+**Server:** `loadUserSenders()` paginates all rows (no 1000-row cap), applies overrides, computes stats.
+
+**Health score** (`src/lib/scoring.ts`) — **ratio-based** (scales with inbox size):
+- Start 100; requires `totalEmails > 0`
+- −90 × (junk emails / total emails)
+- −25 × (unsure emails / total emails)
+- +0.5 per unsubscribed sender (max +8)
+- Unread penalties by % of inbox: >5% −4, >10% −8, >20% −12, >40% −18
+- Sender sprawl: up to −10 if >30 junk senders AND junk senders >25% of all senders
+- Labels: Healthy 80+ (green) / Cluttered 50–79 (amber) / Messy 20–49 (red) / Critical 0–19 (red pulse)
+
+**Stat cards:** junk / unsure / safe **sender counts**; summary card = total **emails** from junk senders.
+
+**Scan CTAs:**
+- Scan My Inbox (full)
+- Continue Scan (partial/cancelled/error with checkpoint)
+- Sync New Emails (incremental via `gmail_history_id`)
+- Rescan Inbox (full, wipes `user_senders`, keeps classification cache)
+- Partial-scan banner + "Review Saved Senders"
+
+**Components:** `HealthScoreCircle`, `StatCard`, `ErrorBoundary`
+
+---
+
+## Senders Page (`/dashboard/senders`)
+
+**Data loading** (`src/lib/senders/loadUserSenders.ts`):
+- Shared by dashboard, senders page, and `GET /api/senders`
+- Paginate by stable `id`; sort by `email_count` desc for display
+- Applies `user_sender_overrides` to classification
+
+**Freshness (Stage 15):**
+- Both pages `export const dynamic = 'force-dynamic'`
+- `SenderList` fetches `GET /api/senders` on mount (bypasses stale RSC router cache)
+- Dashboard links use `prefetch={false}`
+
+**SenderList** (`src/components/SenderList.tsx`):
+- Filter tabs: All / Junk / Unsure / Safe — counts match visible (actionable) rows
+- "Cleaned" = `is_unsubscribed` OR `email_count===0`; hidden by default ("Show cleaned" toggle)
+- **Pagination: 50 senders per page** (`SenderPagination.tsx`) — display only; selection/actions use full filter
+- Select All = all senders in current filter (all pages); selections persist across pages
+- Sticky `ActionBar` when selection exists; `ProgressModal` for action progress
+- Sender override: hover (desktop) / long-press (mobile) Safe/Junk on `SenderCard`
+
+**SenderCard:** avatar, name, email, `N emails · M unread`, classification dot, unsubscribe badge.
+
+---
+
+## Components (key)
+
+| Component | Role |
+|-----------|------|
+| `SenderList` | Main review UI, reducer state, pagination, actions |
+| `SenderCard` | Per-sender row |
+| `SenderPagination` | Prev/Next, page indicator, range text |
+| `FilterTabs` | Classification filter with counts |
+| `ActionBar` | Delete / Mark Read / Archive / Unsub+Delete; 5s delete countdown |
+| `ProgressModal` | Per-sender status, two-phase unsub, ETA, retry |
+| `InstallPrompt` | Add to home screen (iOS/Android) |
+| `LoadingSkeleton` | Route loading state |
+| `ErrorBoundary` | Dashboard + senders error recovery |
+
+---
+
+## PWA & Service Worker
+
+- `public/manifest.json` — charcoal theme, standalone, portrait
+- Icons: `public/icons/icon-192.png`, `icon-512.png`, `icon.svg`
+- `public/sw.js` — **clearity-v5**; cache-first static assets only; **never intercepts `/api/*`**; navigate = network-first with offline fallback
+- `ServiceWorkerRegister` — unregisters legacy SWs + clears `clearity-*` caches before registering (fixes cached 500 scan POSTs)
+- `scripts/generate-icons.mjs` — icon generation (sharp devDep)
+
+---
+
+## Environment Variables
+
+Required in `.env.local` and Vercel:
+
+| Variable | Purpose |
+|----------|---------|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-side DB writes (scans, actions) |
+| `GOOGLE_CLIENT_ID` | Google OAuth |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth |
+| `GEMINI_API_KEY` | Gemini classification |
+| `NEXT_PUBLIC_APP_URL` | App base URL (production domain) |
+| `SCAN_WORKER_SECRET` | Bearer secret for `/api/scan/continue` — **required** for tab-closed scans |
+| `CRON_SECRET` | Bearer for `/api/cron/resume-scans` — Vercel sends automatically when set |
+
+**OAuth notes:**
+- Google Cloud redirect URI = Supabase callback URL only (not app domain)
+- Supabase Auth Site URL + redirect URLs = production domain
+- Gmail API must be enabled on the OAuth project
+
+---
+
+## Deployment (Vercel)
+
+1. Set all env vars above (especially `SCAN_WORKER_SECRET` + `CRON_SECRET`)
+2. Apply `supabase/schema.sql` in Supabase SQL editor (Stage 11 migration required)
+3. Google OAuth: production domain in authorized redirect URIs (via Supabase)
+4. `vercel.json` cron: `/api/cron/resume-scans` daily (`0 0 * * *`) — Hobby plan limit; primary driver is `waitUntil` continuation chain
+5. `next.config.ts` sets `x-vercel-skip-toolbar: 1` on all routes
+
+---
+
+## Utility Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/generate-icons.mjs` | Generate PWA icons |
+| `scripts/verify-scan-logic.mjs` | Regression checks for scan state logic |
+| `scripts/debug-scan-state.mjs` | Debug scan job state |
+
+---
+
+## Types
+
+`src/types/index.ts` — `UserSender`, `ScanProgress`, `Classification`, `FilterValue`, `ClassificationResult`, `UnsubscribeStatus`, `QuotaExceededError`, `ScanCancelledError`
+
+---
+
+## Lib Map (quick reference)
+
+```
+src/lib/
+├── gmail/          client, scanner, listMessages, bulkActions, unsubscribe,
+│                   getMessageIds, processSenders, parseFrom, parseUnsubscribe,
+│                   gmailErrors, handleTokenExpiry, incrementalScan
+├── scan/           runScanChunk, chunkLock, scheduleContinuation, persistence,
+│                   classifyPartial, scanState, scanErrors, scanFetch, actionGuard
+├── classification/ classify, geminiClassifier, ruleBasedClassifier, features
+├── senders/        loadUserSenders
+├── supabase/       client, server, fetchAllRows
+├── scoring.ts      calculateHealthScore (ratio-based)
+├── utils.ts        cn, extractDomain, formatCount, chunk
+└── api/            scanResponse
+```
+
+---
+
+## Stage History (changelog)
+
+### Stage 8 — PWA
+Manifest, icons, service worker, install prompt, offline page, safe areas, desktop max-width.
+
+### Stage 9 — Dashboard
+Health score circle, stat cards, junk email total, settings page, rescan inline.
+
+### Stage 10 — Polish & Reliability
+ErrorBoundary, Gmail token expiry flow, re-scan clear, scan cancel, ETA, sender overrides UI, hide cleaned, unsubscribe-only, a11y, reduced motion, ProgressModal ETA.
+
+### Stage 11 — Resumable & Background Scans
+Chunked scans, `scan_message_ids`, background continuation, cron safety net, incremental sync, atomic chunk lock, adaptive throttle, continuation guard.
+
+### Stage 12 — Production Hardening
+Auth-expiry worker runaway fix, cron resumes errored scans, Supabase 1000-row pagination, classification skip bug fix, scan↔action mutual exclusion, ProgressModal stale-complete race, optimistic update fixes, listing dedupe, Gmail retry hardening, Gemini 2.5 Flash, lint clean.
+
+### Stage 13 — Quota-Proof Checkpointing
+500-message sub-slice checkpointing, deadline-aware quota backoff, listing-phase quota pause, 240s chunk budget.
+
+### Stage 14 — Bulk-Action Scaling + Unsubscribe Reliability
+`processSendersInterleaved`, HTTP-first unsubscribe, `parseMailto`, cleaned-sender filter fix.
+
+### Stage 15 — Production Polish (current)
+- **Dashboard ↔ senders data sync:** `loadUserSenders`, `GET /api/senders`, `force-dynamic`, client fresh fetch, `prefetch={false}`
+- **Sender list pagination:** 50 per page (`SenderPagination`); actions unchanged
+- **Ratio-based health score:** junk/unsure/unread scale with inbox volume
+- **Scan/SW hardening:** SW v5 no API intercept; unregister legacy SWs; cache-bust scan fetches; recoverable scan errors return 200 (not cacheable 500); stale-kick only with `updated_at`; friendly quota messages; `saveScanProgress` throws on DB failure; cancel without `cancelled_at` column
+
+---
+
+## Known Limitations
+
+- Partial-scan health score / stats reflect **scanned portion only**, not full Gmail inbox
+- Bulk actions over very large selections may hit 240s budget — run again to finish (`status='complete'`, "Stopped early…")
+- Bulk action while a parked partial scan exists can clobber scan resume position (senders kept; use Sync or full rescan)
+- Clicking Scan within ~3s of Cancel may no-op once (lock releasing) — click again
+- Intra-slice crash may re-process ≤500 messages (sub-slice checkpoint window)
+- Sender override optimistic updates persist if POST fails until refresh
+- ETA unreliable for first ~10% of scan or bulk action
+- Gmail OAuth app unverified (100 external users until Google verification)
+- Gmail only — no Outlook/Exchange
+- Cron on Hobby is once/day — `waitUntil` chain is primary for background scans
+- Same brand with multiple `From` addresses = multiple sender rows (by design)
+
+---
+
+## Future Work
+
+- Google OAuth verification (privacy policy, brand assets, Google review)
 - Payments / subscription gating
 - Outlook support (Microsoft Graph API)
+- Domain-level UI rollups (display only) for brands with many From addresses
 - Toast notifications for override saves and scan cancellation
-
-### Deployment (Vercel)
-- Set all env vars from `.env.local` in Vercel project settings — including `SCAN_WORKER_SECRET` and `CRON_SECRET` (background scans stall without them)
-- Supabase: apply `supabase/schema.sql` manually in SQL editor — the Stage 11 migration (scan_message_ids table, scan_jobs cursor/list_page_token/list_complete/chunk_locked_at/updated_at, profiles.gmail_history_id) is REQUIRED for resumable scans
-- Google OAuth: add production domain to Authorized Redirect URIs in Google Cloud Console
-- PWA: icons in `public/icons/` are served statically — no build step needed
